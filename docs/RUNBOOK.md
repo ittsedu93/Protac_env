@@ -217,7 +217,25 @@ nohup python -u scripts/dock_warheads_pcsk9.py \
 ```
 
 30 runs → corte → 100 runs nos sobreviventes. **Retomável**: poses já gravadas
-são puladas.
+são puladas, então uma queda custa no máximo o seed em andamento.
+
+### Rodar por cima de SSH sem depender da conexão
+
+`nohup` ignora SIGHUP, mas num terminal do VS Code Remote-SSH o processo ainda
+é filho do servidor remoto do VS Code, que pode encerrar a árvore ao fechar a
+janela. Para um lote de horas, prefira `tmux`:
+
+```bash
+tmux new -s docking
+# dentro da sessão, rode o comando SEM nohup e SEM &
+# solte a sessão com Ctrl+B, depois D
+```
+
+Para voltar depois: `tmux attach -t docking`.
+
+Se o processo já está rodando sob nohup e você não quer reiniciar: confira no
+dia seguinte com `pgrep -af dock_warheads_pcsk9` e, se tiver morrido, basta
+repetir o mesmo comando — a retomada aproveita tudo que já foi calculado.
 
 `--series A` = os 45 de R3 = H (N primário, conjugação limpa). A Série B só
 depois que a pose mostrar que o N-H do R3 não faz ligação de hidrogênio
