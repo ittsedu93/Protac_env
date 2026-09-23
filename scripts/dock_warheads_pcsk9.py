@@ -261,7 +261,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--site", type=Path, required=True)
-    ap.add_argument("--warheads-pdbqt", type=Path, required=True)
+    ap.add_argument("--warheads-pdbqt", type=Path,
+                    help="pasta dos PDBQT; dispensável com --validate-only, "
+                         "que só usa o ligante co-cristalizado")
     ap.add_argument("--outdir", type=Path, required=True)
     ap.add_argument("--warheads-csv", type=Path,
                     help="manifesto, para filtrar por série")
@@ -319,6 +321,8 @@ def main():
                if r["filter_flags"] == "ok" and r["r3"] in keep_r3}
         print(f"\nSérie {args.series}: {len(ids)} warheads do manifesto")
 
+    if args.warheads_pdbqt is None:
+        raise SystemExit("--warheads-pdbqt é obrigatório para a triagem")
     ligands = {p.stem: p for p in sorted(args.warheads_pdbqt.glob("*.pdbqt"))
                if ids is None or p.stem in ids}
     if not ligands:
