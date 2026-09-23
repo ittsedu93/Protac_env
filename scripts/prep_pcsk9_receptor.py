@@ -266,23 +266,48 @@ def extract_ref_ligand(pdb_path: Path, resname: str, out_dir: Path):
 
 def prep_receptor(pdb_path: Path, keep_chains: list[str], out_dir: Path,
                   drop_resnames: list[str]):
+    """Remove cadeias extras/solvente/ligante, protona e converte para PDBQT.
+
+    Sintaxe do ChimeraX: cadeias vão num único `/` separadas por vírgula
+    (`/A,B`), e a negação é `~/A,B`. A forma `~(/A,/B)` é rejeitada com
+    "invalid atoms specifier". O resíduo é selecionado por `::name="063"` —
+    a própria forma que o ChimeraX sugere no log — porque `:063` começando
+    com dígito é ambíguo com número de resíduo.
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
     receptor_pdb = out_dir / f"{pdb_path.stem}_receptor.pdb"
     receptor_pdbqt = receptor_pdb.with_suffix(".pdbqt")
     script = out_dir / f"{pdb_path.stem}_prep.cxc"
 
-    chain_sel = ",".join(f"/{c}" for c in keep_chains)
-    cmds = [f"open {pdb_path}", f"delete ~({chain_sel})",
-            "delete solvent", "delete ions"]
+    todas = sorted({a["chain"] for a in parse_atoms(pdb_path)
+                    if a["record"] == "ATOM"})
+    remover = [c for c in todas if c not in keep_chains]
+
+    cmds = [f"open {pdb_path}"]
+    if remover:                      # spec vazio também é erro no ChimeraX
+        cmds.append(f"delete ~/{','.join(keep_chains)}")
+    cmds += ["delete solvent", "delete ions"]
     for rn in drop_resnames:
-        cmds.append(f"delete :{rn}")
+        cmds.append(f'delete ::name="{rn}"')
     cmds += ["addh", f"save {receptor_pdb}", "exit"]
     script.write_text("\n".join(cmds) + "\n")
 
-    print(f"    ChimeraX ({', '.join(keep_chains)}; removendo {drop_resnames})")
-    subprocess.run([CHIMERAX_EXE, "--nogui", str(script)], check=True)
+    print(f"    ChimeraX: mantendo {keep_chains}"
+          + (f", removendo cadeias {remover}" if remover else "")
+          + f", removendo {drop_resnames}")
+
+    # --exit garante que ele saia mesmo se um comando falhar, em vez de ficar
+    # parado no prompt cmd> esperando entrada que não vem.
+    r = subprocess.run([CHIMERAX_EXE, "--nogui", "--exit", str(script)],
+                       capture_output=True, text=True)
+
     if not receptor_pdb.exists():
-        raise SystemExit(f"ChimeraX não gerou {receptor_pdb}")
+        saida = (r.stdout or "") + (r.stderr or "")
+        raise SystemExit(
+            f"ChimeraX não gerou {receptor_pdb}.\n"
+            f"Script: {script}\n"
+            f"Últimas linhas do ChimeraX:\n"
+            + "\n".join(saida.strip().splitlines()[-25:]))
 
     subprocess.run([OBABEL_EXE, str(receptor_pdb), "-O", str(receptor_pdbqt),
                     "-xr", "-p", "7.4"], check=True)
