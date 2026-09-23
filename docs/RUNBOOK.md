@@ -4,6 +4,19 @@ Ordem de execução com env, tempo e critério de parada de cada etapa. Os passo
 marcados **[PORTÃO]** decidem se faz sentido seguir; os marcados **[PESADO]**
 vão para a workstation com `nohup`/SLURM, nunca no kernel do Jupyter.
 
+## Por onde entrar
+
+**`notebooks/protac_wp1_wp3_pipeline_v2.ipynb`** é o notebook integrado: já traz
+as células do original que continuam válidas, as correções do WP1/WP2 e a etapa
+3.0, na ordem certa. Abra ele com o kernel `mdtools` e rode a célula de Setup —
+ela detecta o repositório sozinha, não importa onde você clonou.
+
+Os arquivos `notebooks/wp1_wp2_revised_cells.py` e
+`notebooks/wp3_pcsk9_warheads_cells.py` continuam disponíveis para quem preferir
+enxertar as células no notebook antigo, mas não são necessários se usar a v2.
+
+Para reconstruir a v2 depois de editar: `python scripts/build_notebook.py`.
+
 Antes de tudo, uma vez:
 
 ```bash
