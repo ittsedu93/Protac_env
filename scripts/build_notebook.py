@@ -70,17 +70,25 @@ erro**:
 
 ## Antes de começar
 
+Não instale o AutoDock Vina. O **Uni-Dock** já está no env `pf_vs` e usa a mesma
+função de scoring (`scoring=vina`), em GPU — e nesta workstation os envs
+pertencem a outro usuário, então instalar não é opção
+(`EnvironmentNotWritableError`).
+
+Confira os motores no **terminal** (nunca numa célula: `conda activate` não
+muda o kernel que já está no ar):
+
 ```bash
-# o env pf_vs pode não ter pip próprio; instale-o primeiro e use -m pip
-conda install -n pf_vs -y -c conda-forge pip
-conda run -n pf_vs python -m pip install vina==1.2.7
-conda run -n pf_vs python -c "import vina; print('vina ok', vina.__version__)"
+conda activate pf_vs
+python ~/Protac_env/scripts/docking_engines.py
 ```
 
-**Não rode isso numa célula do notebook.** `conda activate` não muda o
-interpretador de um kernel que já está no ar, e num cell o IPython transforma
-`conda ...` em `%conda`, que devolve `CondaError: Run 'conda init' before
-'conda activate'`. Terminal do VS Code, sempre.
+E baixe o cristal:
+
+```bash
+mkdir -p ~/structures && cd ~/structures
+wget https://files.rcsb.org/download/6U26.pdb
+```
 """)
 
 # --------------------------------------------------------------------------
@@ -806,7 +814,7 @@ WARHEADS_PDBQT_DIR = WARHEADS_DIR / "pdbqt"
 #   cadeia A = pró-domínio (61-152); cadeia B = catalítico + CHRD (153-682)
 #   O ligante 063 ancora na cadeia B, a 23,4 Å da interface EGF(A)/LDLR:
 #   NÃO é o sítio clássico de inibição PCSK9-LDLR. Decisão consciente.
-PCSK9_PDB_FILE = Path.home() / "structures" / "6U26_1.pdb"
+PCSK9_PDB_FILE = Path.home() / "structures" / "6U26.pdb"
 PCSK9_CHAIN = "B"
 PCSK9_REF_LIGAND = "063"
 PCSK9_DOCKING_DIR = WORK_DIR / "pcsk9_docking"

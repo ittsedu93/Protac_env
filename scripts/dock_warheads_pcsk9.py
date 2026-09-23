@@ -2,9 +2,17 @@
 """
 Etapa 3.0b — docking dos warheads PCSK9 e produção dos `Heads` do PRosettaC.
 
-Roda no env `pf_vs` (precisa de `vina`):
-    conda install -n pf_vs -y -c conda-forge pip
-    conda run -n pf_vs python -m pip install vina==1.2.7
+Roda no env `pf_vs`. Dois motores, mesma função de scoring:
+
+  --engine unidock  (PADRÃO) usa o Uni-Dock já instalado no pf_vs, em GPU e em
+                    lote. Nada a instalar — e nesta workstation os envs
+                    pertencem a outro usuário, então instalar não é opção.
+  --engine vina     AutoDock Vina via API Python, se você tiver um env próprio
+                    onde deu para instalá-lo.
+
+Confira o motor antes de gastar horas:
+    python scripts/docking_engines.py
+
 Lê o `pcsk9_site.json` escrito por `prep_pcsk9_receptor.py`.
 
     conda activate pf_vs
@@ -33,6 +41,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from rmsd_inplace import rmsd_inplace, buried_atom_indices  # noqa: E402
+from docking_engines import (dock_batch, check_engine, parse_pdbqt_score,  # noqa: E402
+                             VINA, UNIDOCK)
 
 OBABEL_EXE = "/home/soberano/miniconda3/envs/obabel_env/bin/obabel"
 
@@ -43,32 +53,40 @@ EXHAUSTIVENESS = 32
 
 
 # ---------------------------------------------------------------------------
-def run_vina_once(receptor_pdbqt, ligand_pdbqt, center, box_size, seed,
-                  exhaustiveness, n_poses, out_pose_pdbqt):
-    from vina import Vina
-    v = Vina(sf_name="vina", seed=seed, cpu=0, verbosity=0)
-    v.set_receptor(str(receptor_pdbqt))
-    v.set_ligand_from_file(str(ligand_pdbqt))
-    v.compute_vina_maps(center=list(center), box_size=list(box_size))
-    v.dock(exhaustiveness=exhaustiveness, n_poses=n_poses)
-    v.write_poses(str(out_pose_pdbqt), n_poses=n_poses, overwrite=True)
-    return v.energies(n_poses=n_poses)[:, 0].tolist()
+def dock_one(engine, site, ligand_pdbqt, seed, exhaustiveness, out_dir,
+             lig_id="lig", **kw):
+    """Uma molécula, um seed. Usado na validação por redocking."""
+    res = dock_batch(engine, receptor_pdbqt=site["receptor_pdbqt"],
+                     ligands={lig_id: ligand_pdbqt}, center=site["center"],
+                     box_size=site["box_size"], seed=seed,
+                     exhaustiveness=exhaustiveness, out_dir=Path(out_dir), **kw)
+    return res[lig_id]
 
 
-def independent_runs(receptor_pdbqt, ligand_pdbqt, center, box_size, n_runs,
-                     exhaustiveness, out_dir, seed_start=1):
-    out_dir.mkdir(parents=True, exist_ok=True)
-    rows = []
+def runs_by_seed(engine, site, ligands: dict, n_runs, exhaustiveness, out_dir,
+                 seed_start=1, **kw):
+    """N runs independentes de TODOS os ligantes.
+
+    O laço externo é o seed, não o ligante: assim cada seed vira uma única
+    chamada em lote na GPU (Uni-Dock) em vez de um processo por molécula.
+    Retomável — um seed cuja pasta já tem as poses é pulado pelo próprio motor.
+
+    Devolve {ligand_id: [{"seed", "best_score", "pose"}, ...]}.
+    """
+    out_dir = Path(out_dir)
+    por_ligante = {lid: [] for lid in ligands}
     for i in range(n_runs):
         seed = seed_start + i
-        pose = out_dir / f"run{seed:03d}.pdbqt"
-        if pose.exists():                       # retomada
-            continue
-        scores = run_vina_once(receptor_pdbqt, ligand_pdbqt, center, box_size,
-                               seed, exhaustiveness, 1, pose)
-        rows.append({"run": i + 1, "seed": seed, "best_score": scores[0],
-                     "pose": str(pose)})
-    return rows
+        res = dock_batch(engine, receptor_pdbqt=site["receptor_pdbqt"],
+                         ligands=ligands, center=site["center"],
+                         box_size=site["box_size"], seed=seed,
+                         exhaustiveness=exhaustiveness,
+                         out_dir=out_dir / f"seed{seed:03d}", **kw)
+        for lid, (score, pose) in res.items():
+            if score is not None:
+                por_ligante[lid].append({"seed": seed, "best_score": score,
+                                         "pose": str(pose)})
+    return por_ligante
 
 
 def summarize(rows):
@@ -98,7 +116,7 @@ def receptor_heavy_coords(receptor_pdb: Path) -> np.ndarray:
 
 # ---------------------------------------------------------------------------
 def validate_protocol(site: dict, out_dir: Path, exhaustiveness: int,
-                      n_runs: int = 5) -> bool:
+                      engine: str = UNIDOCK, n_runs: int = 5, **kw) -> bool:
     """Redocking do ligante co-cristalizado.
 
     Dois números: RMSD do núcleo enterrado (o que decide) e RMSD do ligante
@@ -128,10 +146,13 @@ def validate_protocol(site: dict, out_dir: Path, exhaustiveness: int,
 
     results = []
     for seed in range(1, n_runs + 1):
-        pose_pdbqt = out_dir / f"redock_seed{seed}.pdbqt"
-        scores = run_vina_once(site["receptor_pdbqt"], ref_pdbqt,
-                               site["center"], site["box_size"], seed,
-                               exhaustiveness, 1, pose_pdbqt)
+        score, pose_pdbqt = dock_one(engine, site, ref_pdbqt, seed,
+                                     exhaustiveness,
+                                     out_dir / f"redock_seed{seed}",
+                                     lig_id="ref", **kw)
+        if score is None:
+            print(f"  seed {seed}: o motor não produziu pose")
+            continue
         pose_sdf = pdbqt_to_sdf(pose_pdbqt, pose_pdbqt.with_suffix(".sdf"))
         probe = Chem.MolFromMolFile(str(pose_sdf), removeHs=True)
         if probe is None:
@@ -143,8 +164,8 @@ def validate_protocol(site: dict, out_dir: Path, exhaustiveness: int,
         except ValueError as exc:
             print(f"  seed {seed}: RMSD falhou — {exc}")
             continue
-        results.append((seed, scores[0], rmsd_core, rmsd_full))
-        print(f"  seed {seed}: score {scores[0]:7.2f} kcal/mol | "
+        results.append((seed, score, rmsd_core, rmsd_full))
+        print(f"  seed {seed}: score {score:7.2f} kcal/mol | "
               f"RMSD núcleo {rmsd_core:5.2f} Å | ligante inteiro {rmsd_full:5.2f} Å")
 
     if not results:
@@ -170,37 +191,45 @@ def validate_protocol(site: dict, out_dir: Path, exhaustiveness: int,
 
 # ---------------------------------------------------------------------------
 def staged_screening(site, ligands: dict, out_dir: Path, exhaustiveness: int,
-                     round1_cutoff: float):
+                     round1_cutoff: float, engine: str = UNIDOCK, **kw):
+    out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    r1 = []
+
     print(f"\nRound 1 — {ROUND1_N_RUNS} runs x {len(ligands)} warheads")
-    for i, (lid, lpath) in enumerate(ligands.items(), 1):
-        rows = independent_runs(site["receptor_pdbqt"], lpath, site["center"],
-                                site["box_size"], ROUND1_N_RUNS, exhaustiveness,
-                                out_dir / "round1" / lid)
+    bruto1 = runs_by_seed(engine, site, ligands, ROUND1_N_RUNS, exhaustiveness,
+                          out_dir / "round1", **kw)
+    r1 = []
+    for lid, rows in bruto1.items():
         s = summarize(rows)
         if s:
             s["ligand_id"] = lid
             r1.append(s)
-            print(f"  [{i:3d}/{len(ligands)}] {lid}: best {s['best_score']:.2f} "
-                  f"(sd {s['std_score']:.2f})")
+    r1.sort(key=lambda d: d["best_score"])
+    for s in r1[:10]:
+        print(f"  {s['ligand_id']}: best {s['best_score']:.2f} "
+              f"(sd {s['std_score']:.2f}, n={s['n_runs']})")
 
-    survivors = [r["ligand_id"] for r in r1 if r["best_score"] <= round1_cutoff]
+    survivors = {s["ligand_id"]: ligands[s["ligand_id"]] for s in r1
+                 if s["best_score"] <= round1_cutoff}
     print(f"\nRound 1: {len(survivors)}/{len(ligands)} abaixo de {round1_cutoff}")
+    if not survivors:
+        print("  Nenhum sobrevivente. Corte frouxo demais ou sítio errado —")
+        print("  reveja antes de afrouxar --round1-cutoff por conveniência.")
+        return r1, []
 
-    r2 = []
     print(f"\nRound 2 — {ROUND2_N_RUNS} runs x {len(survivors)} sobreviventes")
-    for i, lid in enumerate(survivors, 1):
-        rows = independent_runs(site["receptor_pdbqt"], ligands[lid],
-                                site["center"], site["box_size"],
-                                ROUND2_N_RUNS, exhaustiveness,
-                                out_dir / "round2" / lid)
+    bruto2 = runs_by_seed(engine, site, survivors, ROUND2_N_RUNS,
+                          exhaustiveness, out_dir / "round2", **kw)
+    r2 = []
+    for lid, rows in bruto2.items():
         s = summarize(rows)
         if s:
             s["ligand_id"] = lid
             r2.append(s)
-            print(f"  [{i:3d}/{len(survivors)}] {lid}: best {s['best_score']:.2f} "
-                  f"(sd {s['std_score']:.2f})")
+    r2.sort(key=lambda d: d["best_score"])
+    for s in r2[:10]:
+        print(f"  {s['ligand_id']}: best {s['best_score']:.2f} "
+              f"(sd {s['std_score']:.2f}, n={s['n_runs']})")
     return r1, r2
 
 
@@ -210,24 +239,20 @@ def export_heads(r2, out_dir: Path, heads_dir: Path):
     made = []
     for row in r2:
         lid = row["ligand_id"]
-        runs = sorted((out_dir / "round2" / lid).glob("run*.pdbqt"))
-        if not runs:
-            continue
-        best_pose, best_score = None, np.inf
-        for p in runs:
-            for line in p.read_text().splitlines():
-                if line.startswith("REMARK VINA RESULT"):
-                    sc = float(line.split()[3])
-                    if sc < best_score:
-                        best_score, best_pose = sc, p
-                    break
-        if best_pose is None:
+        poses = sorted((Path(out_dir) / "round2").glob(f"seed*/{lid}*_out.pdbqt"))
+        melhor, melhor_score = None, np.inf
+        for p in poses:
+            sc = parse_pdbqt_score(p)
+            if sc is not None and sc < melhor_score:
+                melhor_score, melhor = sc, p
+        if melhor is None:
+            print(f"  [sem pose] {lid}")
             continue
         sdf = heads_dir / f"{lid}_in_pcsk9.sdf"
-        pdbqt_to_sdf(best_pose, sdf)
+        pdbqt_to_sdf(melhor, sdf)
         made.append({"warhead_id": lid, "head_sdf": str(sdf),
-                     "best_score": best_score, "source_pose": str(best_pose)})
-        print(f"  {lid}: {best_score:.2f} kcal/mol -> {sdf.name}")
+                     "best_score": melhor_score, "source_pose": str(melhor)})
+        print(f"  {lid}: {melhor_score:.2f} kcal/mol -> {sdf.name}")
     return made
 
 
@@ -245,9 +270,23 @@ def main():
     ap.add_argument("--validate-only", action="store_true")
     ap.add_argument("--skip-validation", action="store_true",
                     help="pula o redocking; assume o risco explicitamente")
+    ap.add_argument("--engine", choices=[UNIDOCK, VINA], default=UNIDOCK,
+                    help="unidock (padrão, GPU, já instalado) ou vina")
+    ap.add_argument("--unidock-exe", help="caminho do executável, se não no PATH")
+    ap.add_argument("--batch-size", type=int, default=40,
+                    help="ligantes por lote na GPU (default 40); reduza se a "
+                         "memória da GPU estourar")
+    ap.add_argument("--search-mode", choices=["fast", "balance", "detail"],
+                    help="preset do Uni-Dock; substitui --exhaustiveness")
     ap.add_argument("--exhaustiveness", type=int, default=EXHAUSTIVENESS)
     ap.add_argument("--round1-cutoff", type=float, default=-7.0)
     args = ap.parse_args()
+
+    print("[motor]", check_engine(args.engine, args.unidock_exe))
+    kw = {}
+    if args.engine == UNIDOCK:
+        kw = dict(unidock_exe=args.unidock_exe, batch_size=args.batch_size,
+                  search_mode=args.search_mode)
 
     site = json.loads(args.site.read_text())
     out = args.outdir.expanduser()
@@ -260,7 +299,8 @@ def main():
 
     if not args.skip_validation:
         print("[validação] redocking do ligante co-cristalizado")
-        ok = validate_protocol(site, out / "validation", args.exhaustiveness)
+        ok = validate_protocol(site, out / "validation", args.exhaustiveness,
+                               engine=args.engine, **kw)
         if args.validate_only:
             return
         if not ok:
@@ -287,7 +327,7 @@ def main():
     print(f"{len(ligands)} warheads para dockar")
 
     r1, r2 = staged_screening(site, ligands, out, args.exhaustiveness,
-                              args.round1_cutoff)
+                              args.round1_cutoff, engine=args.engine, **kw)
 
     for name, data in (("round1_scores.csv", r1), ("round2_scores.csv", r2)):
         if data:

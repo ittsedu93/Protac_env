@@ -19,33 +19,31 @@ Para reconstruir a v2 depois de editar: `python scripts/build_notebook.py`.
 
 ## Pré-requisitos do ambiente
 
-### Os envs conda podem ser read-only
+### Não instale o Vina — use o Uni-Dock
 
-Nesta workstation os envs vivem em `/home/soberano/miniconda3/envs/`, que
-pertence ao usuário `soberano`. Rodando como outro usuário você consegue
-**ativar** os envs, mas não instalar nada neles:
+O cabeçalho do notebook original já registrava: **Uni-Dock está instalado no
+`pf_vs`**, é "motor compatível c/ scoring Vina, GPU", mesma `scoring=vina`.
 
-```
-EnvironmentNotWritableError: The current user does not have write permissions
-  environment location: /home/soberano/miniconda3/envs/pf_vs
-```
+Isso resolve de vez o problema de permissão: nesta workstation os envs vivem em
+`/home/soberano/miniconda3/envs/`, que pertence ao usuário `soberano`. Rodando
+como outro usuário você ativa os envs mas não instala neles
+(`EnvironmentNotWritableError`), e o `pf_vs` nem pip tem. Com o Uni-Dock não há
+o que instalar.
 
-Clone o env para um prefixo seu (rápido: usa hardlinks no mesmo sistema de
-arquivos) e trabalhe nele:
+Confirme os motores disponíveis antes de qualquer coisa:
 
 ```bash
-conda create -y --prefix ~/envs/pf_vs --clone /home/soberano/miniconda3/envs/pf_vs
-conda install -y --prefix ~/envs/pf_vs -c conda-forge pip
-conda run --prefix ~/envs/pf_vs python -m pip install vina==1.2.7
-conda run --prefix ~/envs/pf_vs python -c "import vina, meeko; print('vina+meeko ok')"
+conda activate pf_vs
+python ~/Protac_env/scripts/docking_engines.py
 ```
 
-A partir daí, onde o runbook disser `conda activate pf_vs`, use
-`conda activate ~/envs/pf_vs` (ou `conda run --prefix ~/envs/pf_vs ...`).
+Deve imprimir `unidock OK — unidock: Uni-Dock vX.Y`. O `--engine unidock` é o
+padrão do `dock_warheads_pcsk9.py`, então os comandos do runbook já usam ele.
 
-Alternativa sem instalar nada: o **Uni-Dock** já está no `pf_vs` e usa a mesma
-função de scoring do Vina, em GPU. Se preferir esse caminho, diga — o
-`dock_warheads_pcsk9.py` precisa de um backend a mais para chamá-lo.
+Além de dispensar instalação, o Uni-Dock docka em **lote na GPU**: o script
+inverte os laços e faz uma chamada por seed com todos os warheads, em vez de um
+processo por molécula. Para 45 warheads × 30 runs, são 30 chamadas em vez de
+1350.
 
 **Nada disso roda em célula de notebook.** `conda activate` não muda o
 interpretador de um kernel já no ar, e o IPython converte `conda ...` em
@@ -65,13 +63,14 @@ Confira que bate com o que o pipeline espera — cadeia A 61-152, cadeia B
 153-682, um HET `063`:
 
 ```bash
+conda activate mdtools
 python ~/Protac_env/scripts/prep_pcsk9_receptor.py \
     --pdb-file ~/structures/6U26.pdb --outdir ~/PCSK9_docking --inspect-only
 ```
 
 Se aparecer mais de uma cópia do `063`, você pegou a unidade assimétrica com
-várias moléculas no cristal; nesse caso use a assembly biológica
-(`6U26.pdb1`) ou mantenha só um par de cadeias.
+várias moléculas no cristal; use a assembly biológica (`6U26.pdb1`) ou mantenha
+só um par de cadeias.
 
 ---
 
