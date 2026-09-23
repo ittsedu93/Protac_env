@@ -27,11 +27,17 @@ WARHEADS_CSV = WARHEADS_DIR / "pcsk9_warheads.csv"
 WARHEADS_SDF_DIR = WARHEADS_DIR / "sdf"          # atomo 0 = N de conjugação
 WARHEADS_PDBQT_DIR = WARHEADS_DIR / "pdbqt"      # criado por prepare_pdbqt.sh
 
-# --- alvo: PCSK9 ---
-# 2P4E = PCSK9 madura (pró-domínio + catalítico); 3BPS = PCSK9:LDLR-EGF(A).
-# Escolha conforme o sítio que os warheads devem ocupar e confira as cadeias.
-PCSK9_PDB_IDS = ["2P4E", "3BPS"]
-PCSK9_CHAIN = "A"                                 # TODO: conferir no PDB baixado
+# --- alvo: PCSK9, co-cristal 6U26 ---
+# 6U26 = PCSK9 + "composto 16" (HET 063), raios-X 1,53 Å.
+#   cadeia A = pró-domínio (res 61-152)
+#   cadeia B = catalítico + CHRD (res 153-682)  <- o ligante 063 ancora aqui
+# O co-cristal dá as três coisas que o docking precisa: onde é o sítio, como
+# validar o protocolo (redocking) e para onde o linker pode sair.
+PCSK9_PDB_FILE = Path.home() / "structures" / "6U26_1.pdb"   # ajuste o caminho
+PCSK9_CHAIN = "B"
+PCSK9_REF_LIGAND = "063"
+PCSK9_DOCKING_DIR = WORK_DIR / "pcsk9_docking"
+PCSK9_SITE_JSON = PCSK9_DOCKING_DIR / "pcsk9_site.json"
 
 # --- sub-complexos recrutador-linker validados no WP2 ---
 WP2_SUBCOMPLEXES_DIR = WORK_DIR / "wp2_subcomplexes"
@@ -91,31 +97,149 @@ display(serie_A[["warhead_id", "r1", "r2", "r3", "mw", "clogp",
 # moléculas novas — o PRosettaC precisa de `HeadB.sdf` **já posicionado** dentro
 # da estrutura da PCSK9, então é preciso produzir essa pose primeiro.
 #
-# Reaproveite as funções do WP1 (`independent_docking_runs`, `score_summary`,
-# `validate_docking_protocol`) apontando o receptor para a PCSK9.
+# O co-cristal 6U26 (PCSK9 + composto 16, 1,53 Å) resolve os três pontos:
+#
+# | precisa de | 6U26 fornece |
+# |---|---|
+# | onde dockar | bolsão ocupado pelo ligante `063`, medido da estrutura |
+# | como validar | redocking do `063`, com o corte RMSD ≤ 2,0 Å do WP1 |
+# | para onde o linker sai | braço PEG/guanidina do `063`, exposto ao solvente |
+#
+# As duas etapas pesadas rodam **fora do kernel**, em envs diferentes.
+
+# %% [markdown]
+# ### 3.0a Preparo do receptor e definição do sítio (env `mdtools`, minutos)
+#
+# Primeiro inspecione, depois prepare — nessa ordem.
 
 # %%
-# 1) baixar e preparar a PCSK9 (mesmo caminho do WP1)
-pcsk9_paths = {pid: fetch_pdb(pid, WORK_DIR / "pdb" / "PCSK9") for pid in PCSK9_PDB_IDS}
-print(pcsk9_paths)
+print("# 1) inspeção (confira as cadeias antes de qualquer coisa):")
+print(f"python scripts/prep_pcsk9_receptor.py \\\n"
+      f"    --pdb-file {PCSK9_PDB_FILE} \\\n"
+      f"    --outdir {PCSK9_DOCKING_DIR} --inspect-only")
 
-# 2) definir o sítio: centro/box do bolsão que os warheads devem ocupar.
-#    Sem ligante co-cristalizado não há redocking para validar — declare o sítio
-#    a partir da literatura/análise de cavidade e registre essa escolha.
-PCSK9_SITE_CENTER = (0.0, 0.0, 0.0)   # TODO: preencher (ChimeraX/fpocket)
-PCSK9_BOX_SIZE = (24.0, 24.0, 24.0)
+print("\n# 2) sítio + receptor + ligante de referência:")
+print(f"python scripts/prep_pcsk9_receptor.py \\\n"
+      f"    --pdb-file {PCSK9_PDB_FILE} \\\n"
+      f"    --outdir {PCSK9_DOCKING_DIR} \\\n"
+      f"    --target-chain {PCSK9_CHAIN} --keep-chains A B \\\n"
+      f"    --site-mode ligand --ref-ligand-resname {PCSK9_REF_LIGAND} \\\n"
+      f"    --burial-threshold 20")
 
-# 3) docking em dois estágios, igual ao WP1
-# warhead_pdbqts = {r.warhead_id: WARHEADS_PDBQT_DIR / f"{r.warhead_id}.pdbqt"
-#                   for r in serie_A.itertuples()}
-# r1_pcsk9, r2_pcsk9 = staged_screening(
-#     warhead_pdbqts, receptor_pdbqt=pcsk9_receptor_pdbqt,
-#     center=PCSK9_SITE_CENTER, box_size=PCSK9_BOX_SIZE,
-#     out_dir=WP3_DIR / "warhead_docking", round1_cutoff_score=-7.0)
+# %% [markdown]
+# O `--burial-threshold 20` não é cosmético. O ligante `063` tem 76 átomos
+# pesados, dos quais ~17 formam um braço de ~15 Å solto no solvente. Medido no
+# ligante inteiro o box sai com ~28 Å de aresta e o docking vira busca cega;
+# restrito ao núcleo ancorado ele fica em ~20 × 18 × 18 Å, que é o tamanho certo
+# para moléculas de 230–420 Da.
+
+# %%
+# Depois de rodar o 3.0a, carregue o sítio e confira:
+site = json.loads(PCSK9_SITE_JSON.read_text())
+print("centro         :", site["center"])
+print("box (Å)        :", site["box_size"])
+print("vetor de saída :", site["exit_vector"], f"({site['exit_arm_length_A']} Å)")
+print("contatos       :", len(site["contact_residues"]), "resíduos")
+print("origem         :", site["provenance"])
+
+# %% [markdown]
+# ### 3.0b Validação do protocolo (env `pf_vs`) — **passe por aqui antes da triagem**
 #
-# 4) converter a melhor pose de cada warhead priorizado em SDF — este é o
-#    HeadB.sdf do PRosettaC (pose na PCSK9, não o confôrmero isolado):
-# subprocess.run([OBABEL_EXE, str(best_pose_pdbqt), "-O", str(head_b_sdf)], check=True)
+# `--validate-only` faz só o redocking do `063` e para. Se o RMSD de núcleo não
+# fechar em ≤ 2,0 Å, não adianta dockar 45 warheads: o protocolo não reproduz
+# nem a pose que o cristal já entregou.
+#
+# **Atenção ao RMSD:** a função `redocking_rmsd()` da célula 1.6 deste notebook
+# usa `rdMolAlign.GetBestRMS`, que **superpõe as moléculas antes de medir** e
+# ainda **altera as coordenadas do probe**. Uma pose no bolsão errado, a 25 Å do
+# lugar certo, é reportada por ela como RMSD 0,00 — o portão de validação do WP1
+# está passando qualquer coisa. Use `scripts/rmsd_inplace.py` (ou
+# `rdMolAlign.CalcRMS`, que mede in-place) no lugar dela, também no WP1.
+
+# %%
+print(f"conda activate pf_vs")
+print(f"python scripts/dock_warheads_pcsk9.py \\\n"
+      f"    --site {PCSK9_SITE_JSON} \\\n"
+      f"    --warheads-pdbqt {WARHEADS_DIR / 'pdbqt'} \\\n"
+      f"    --outdir {PCSK9_DOCKING_DIR / 'docking'} --validate-only")
+
+# %% [markdown]
+# ### 3.0c Triagem em dois estágios (env `pf_vs`, horas — `nohup`/SLURM)
+#
+# 30 runs independentes por warhead, corte por score, 100 runs nos
+# sobreviventes. O script é retomável: poses já gravadas são puladas, então uma
+# queda no meio não custa o lote inteiro.
+
+# %%
+print(f"nohup python scripts/dock_warheads_pcsk9.py \\\n"
+      f"    --site {PCSK9_SITE_JSON} \\\n"
+      f"    --warheads-pdbqt {WARHEADS_DIR / 'pdbqt'} \\\n"
+      f"    --warheads-csv {WARHEADS_CSV} --series A \\\n"
+      f"    --outdir {PCSK9_DOCKING_DIR / 'docking'} \\\n"
+      f"    > {PCSK9_DOCKING_DIR}/docking.log 2>&1 &")
+
+# %% [markdown]
+# Ao fim, `docking/heads_pcsk9/<ID>_in_pcsk9.sdf` são os `HeadB` posicionados
+# que o PRosettaC consome, e `heads_manifest.json` lista qual pose virou qual
+# Head.
+
+# %%
+# Leitura dos resultados quando a triagem terminar:
+def load_docking_results(docking_dir: Path = PCSK9_DOCKING_DIR / "docking"):
+    r2 = pd.read_csv(docking_dir / "round2_scores.csv")
+    heads = pd.DataFrame(json.loads((docking_dir / "heads_manifest.json").read_text()))
+    df = r2.merge(heads, left_on="ligand_id", right_on="warhead_id", how="inner")
+    return df.sort_values("best_score")
+
+
+# results = load_docking_results()
+# display(results[["warhead_id", "best_score", "std_score", "head_sdf"]].head(15))
+
+
+# %% [markdown]
+# ### 3.0d Conferência obrigatória antes de gastar horas de PRosettaC
+#
+# Duas checagens que custam minutos e evitam dias perdidos.
+
+# %%
+def check_pose_consistency(results: pd.DataFrame, sd_max: float = 1.0):
+    """std_score alto entre runs independentes = pose instável. Score bom com
+    dispersão alta é candidato a falso positivo, não a hit."""
+    unstable = results[results["std_score"] > sd_max]
+    print(f"{len(unstable)}/{len(results)} com desvio > {sd_max} kcal/mol")
+    return unstable
+
+
+def check_exit_vector_accessible(head_sdf: Path, site: dict,
+                                 receptor_pdb: Path, min_clearance: float = 3.0):
+    """O N de conjugação do warhead aponta para o solvente, na direção do braço
+    do 063? Se ele ficar enterrado, não há por onde o linker sair e o candidato
+    morre no WP2 — melhor descobrir agora."""
+    import numpy as np
+    from rdkit import Chem
+
+    mol = Chem.MolFromMolFile(str(head_sdf), removeHs=True)
+    if mol is None:
+        return None
+    patt = Chem.MolFromSmarts("c[CH2][CH2][NX3]")
+    match = mol.GetSubstructMatches(patt)
+    if not match:
+        return None
+    n_pos = np.array(mol.GetConformer().GetAtomPosition(match[0][-1]))
+
+    rec = np.array([(float(l[30:38]), float(l[38:46]), float(l[46:54]))
+                    for l in Path(receptor_pdb).read_text().splitlines()
+                    if l.startswith("ATOM") and (l[76:78].strip() or "C") != "H"])
+    clearance = float(np.linalg.norm(rec - n_pos, axis=1).min())
+
+    v = n_pos - np.array(site["center"])
+    nv = np.linalg.norm(v)
+    cos = float(np.dot(v / (nv + 1e-9), np.array(site["exit_vector"])))
+
+    return {"n_clearance_A": round(clearance, 2),
+            "cos_to_exit_vector": round(cos, 3),
+            "solvent_exposed": clearance >= min_clearance,
+            "aligned_with_063_arm": cos > 0.3}
 
 
 # %% [markdown]
