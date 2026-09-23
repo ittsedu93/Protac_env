@@ -17,19 +17,61 @@ enxertar as células no notebook antigo, mas não são necessários se usar a v2
 
 Para reconstruir a v2 depois de editar: `python scripts/build_notebook.py`.
 
-Antes de tudo, uma vez:
+## Pré-requisitos do ambiente
 
-```bash
-# o env pf_vs pode não ter pip próprio; instale-o primeiro e use -m pip
-conda install -n pf_vs -y -c conda-forge pip
-conda run -n pf_vs python -m pip install vina==1.2.7
-conda run -n pf_vs python -c "import vina; print('vina ok', vina.__version__)"
+### Os envs conda podem ser read-only
+
+Nesta workstation os envs vivem em `/home/soberano/miniconda3/envs/`, que
+pertence ao usuário `soberano`. Rodando como outro usuário você consegue
+**ativar** os envs, mas não instalar nada neles:
+
+```
+EnvironmentNotWritableError: The current user does not have write permissions
+  environment location: /home/soberano/miniconda3/envs/pf_vs
 ```
 
-**Não rode isso numa célula do notebook.** `conda activate` não muda o
-interpretador de um kernel que já está no ar, e num cell o IPython transforma
-`conda ...` em `%conda`, que devolve `CondaError: Run 'conda init' before
-'conda activate'`. Terminal do VS Code, sempre.
+Clone o env para um prefixo seu (rápido: usa hardlinks no mesmo sistema de
+arquivos) e trabalhe nele:
+
+```bash
+conda create -y --prefix ~/envs/pf_vs --clone /home/soberano/miniconda3/envs/pf_vs
+conda install -y --prefix ~/envs/pf_vs -c conda-forge pip
+conda run --prefix ~/envs/pf_vs python -m pip install vina==1.2.7
+conda run --prefix ~/envs/pf_vs python -c "import vina, meeko; print('vina+meeko ok')"
+```
+
+A partir daí, onde o runbook disser `conda activate pf_vs`, use
+`conda activate ~/envs/pf_vs` (ou `conda run --prefix ~/envs/pf_vs ...`).
+
+Alternativa sem instalar nada: o **Uni-Dock** já está no `pf_vs` e usa a mesma
+função de scoring do Vina, em GPU. Se preferir esse caminho, diga — o
+`dock_warheads_pcsk9.py` precisa de um backend a mais para chamá-lo.
+
+**Nada disso roda em célula de notebook.** `conda activate` não muda o
+interpretador de um kernel já no ar, e o IPython converte `conda ...` em
+`%conda`, devolvendo `CondaError: Run 'conda init' before 'conda activate'`.
+Terminal do VS Code, sempre.
+
+### O cristal da PCSK9
+
+Baixe direto, sem depender de onde você salvou:
+
+```bash
+mkdir -p ~/structures && cd ~/structures
+wget https://files.rcsb.org/download/6U26.pdb
+```
+
+Confira que bate com o que o pipeline espera — cadeia A 61-152, cadeia B
+153-682, um HET `063`:
+
+```bash
+python ~/Protac_env/scripts/prep_pcsk9_receptor.py \
+    --pdb-file ~/structures/6U26.pdb --outdir ~/PCSK9_docking --inspect-only
+```
+
+Se aparecer mais de uma cópia do `063`, você pegou a unidade assimétrica com
+várias moléculas no cristal; nesse caso use a assembly biológica
+(`6U26.pdb1`) ou mantenha só um par de cadeias.
 
 ---
 
