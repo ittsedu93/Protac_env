@@ -16,10 +16,14 @@
 from pathlib import Path
 import json
 import subprocess
+import sys
 
 import pandas as pd
 from rdkit import Chem
 from rdkit.Chem import AllChem
+
+sys.path.insert(0, str(Path.home() / "Protac_env" / "scripts"))
+from wp2_linker_tools import assemble_protac, find_dummy, WARHEAD_ISOTOPE
 
 # --- saída do generate_pcsk9_warheads.py ---
 WARHEADS_DIR = Path.home() / "PCSK9_warheads"
@@ -245,10 +249,15 @@ def check_exit_vector_accessible(head_sdf: Path, site: dict,
 # %% [markdown]
 # ## 3.2 Montar o PROTAC completo (recrutador–linker + warhead PCSK9)
 #
-# `assemble_full_protac()` do notebook funciona sem alteração com estes
-# warheads: o gerador renumera cada molécula para que **o átomo 0 seja o
-# nitrogênio de conjugação**, que é exatamente o que
-# `ReplaceSubstructs(..., replacementConnectionPoint=0)` espera.
+# Use `assemble_protac()` de `wp2_linker_tools`, **não** o
+# `assemble_full_protac()` da célula 3.2 original. A diferença não é estética:
+# o original procura `[#0]` e, quando não acha (sub-complexo já capeado no WP2),
+# o RDKit devolve a molécula **inalterada** sem erro — e o lote inteiro vira
+# recrutador-linker sem warhead nenhum, silenciosamente. `assemble_protac()`
+# procura o `[2*]` rotulado, confere a contagem de átomos e levanta exceção.
+#
+# Os warheads já saem do gerador com **o átomo 0 sendo o nitrogênio de
+# conjugação**, que é o que `replacementConnectionPoint=0` espera.
 
 # %%
 def load_warhead_for_assembly(warhead_id: str, sdf_dir: Path = WARHEADS_SDF_DIR):
@@ -272,8 +281,8 @@ def build_protac_matrix(subcomplex_mols: dict, warhead_ids: list, out_dir: Path)
         for wid in warhead_ids:
             wh_mol = load_warhead_for_assembly(wid)
             try:
-                full = assemble_full_protac(sc_mol, wh_mol)
-            except Exception as exc:                      # valência, cap ausente...
+                full = assemble_protac(sc_mol, wh_mol)
+            except ValueError as exc:      # [2*] ausente, valência, contagem
                 print(f"  [falha] {sc_id} x {wid}: {exc}")
                 continue
             cand_id = f"{sc_id}__{wid}"
@@ -295,9 +304,11 @@ def build_protac_matrix(subcomplex_mols: dict, warhead_ids: list, out_dir: Path)
     return df
 
 
-# Exemplo de uso (preencha subcomplex_mols com as saídas reais do WP2):
+# Exemplo de uso. Carregue as versões do WP2 que mantêm o [2*] livre — NUNCA
+# os arquivos *_capped_md.sdf, que são a cópia capeada para a MD de nível (i):
 # subcomplex_mols = {p.stem: Chem.MolFromMolFile(str(p))
-#                    for p in sorted(WP2_SUBCOMPLEXES_DIR.glob("*.sdf"))}
+#                    for p in sorted(WP2_SUBCOMPLEXES_DIR.rglob("*.sdf"))
+#                    if "_capped_md" not in p.name}
 # protac_df = build_protac_matrix(subcomplex_mols,
 #                                 serie_A["warhead_id"].tolist(),
 #                                 WP3_DIR / "protacs")
