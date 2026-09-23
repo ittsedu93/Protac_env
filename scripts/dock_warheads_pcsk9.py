@@ -35,6 +35,7 @@ import csv
 import json
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -72,21 +73,35 @@ def runs_by_seed(engine, site, ligands: dict, n_runs, exhaustiveness, out_dir,
     chamada em lote na GPU (Uni-Dock) em vez de um processo por molécula.
     Retomável — um seed cuja pasta já tem as poses é pulado pelo próprio motor.
 
+    Imprime progresso por seed com flush: sem isso um lote de horas não produz
+    saída nenhuma até terminar, e um `tail -f` do log parece travado.
+
     Devolve {ligand_id: [{"seed", "best_score", "pose"}, ...]}.
     """
     out_dir = Path(out_dir)
     por_ligante = {lid: [] for lid in ligands}
+    t0 = time.time()
     for i in range(n_runs):
         seed = seed_start + i
+        t1 = time.time()
         res = dock_batch(engine, receptor_pdbqt=site["receptor_pdbqt"],
                          ligands=ligands, center=site["center"],
                          box_size=site["box_size"], seed=seed,
                          exhaustiveness=exhaustiveness,
                          out_dir=out_dir / f"seed{seed:03d}", **kw)
+        n_ok = 0
         for lid, (score, pose) in res.items():
             if score is not None:
                 por_ligante[lid].append({"seed": seed, "best_score": score,
                                          "pose": str(pose)})
+                n_ok += 1
+
+        dt = time.time() - t1
+        decorrido = time.time() - t0
+        falta = decorrido / (i + 1) * (n_runs - i - 1)
+        print(f"  seed {i + 1:3d}/{n_runs}  {n_ok}/{len(ligands)} poses  "
+              f"{dt:6.1f}s  (decorrido {decorrido / 60:.0f} min, "
+              f"faltam ~{falta / 60:.0f} min)", flush=True)
     return por_ligante
 
 
@@ -235,7 +250,7 @@ def staged_screening(site, ligands: dict, out_dir: Path, exhaustiveness: int,
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"\nRound 1 — {ROUND1_N_RUNS} runs x {len(ligands)} warheads")
+    print(f"\nRound 1 — {ROUND1_N_RUNS} runs x {len(ligands)} warheads", flush=True)
     bruto1 = runs_by_seed(engine, site, ligands, ROUND1_N_RUNS, exhaustiveness,
                           out_dir / "round1", **kw)
     r1 = []
@@ -251,13 +266,13 @@ def staged_screening(site, ligands: dict, out_dir: Path, exhaustiveness: int,
 
     survivors = {s["ligand_id"]: ligands[s["ligand_id"]] for s in r1
                  if s["best_score"] <= round1_cutoff}
-    print(f"\nRound 1: {len(survivors)}/{len(ligands)} abaixo de {round1_cutoff}")
+    print(f"\nRound 1: {len(survivors)}/{len(ligands)} abaixo de {round1_cutoff}", flush=True)
     if not survivors:
         print("  Nenhum sobrevivente. Corte frouxo demais ou sítio errado —")
         print("  reveja antes de afrouxar --round1-cutoff por conveniência.")
         return r1, []
 
-    print(f"\nRound 2 — {ROUND2_N_RUNS} runs x {len(survivors)} sobreviventes")
+    print(f"\nRound 2 — {ROUND2_N_RUNS} runs x {len(survivors)} sobreviventes", flush=True)
     bruto2 = runs_by_seed(engine, site, survivors, ROUND2_N_RUNS,
                           exhaustiveness, out_dir / "round2", **kw)
     r2 = []

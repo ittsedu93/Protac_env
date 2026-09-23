@@ -208,7 +208,7 @@ reproduz, o problema é receptor ou box, não azar.
 ## 2.4 [PESADO] Triagem em dois estágios — `pf_vs`, horas
 
 ```bash
-nohup python scripts/dock_warheads_pcsk9.py \
+nohup python -u scripts/dock_warheads_pcsk9.py \
     --site ~/PCSK9_docking/pcsk9_site.json \
     --warheads-pdbqt ~/PCSK9_warheads/pdbqt \
     --warheads-csv ~/PCSK9_warheads/pcsk9_warheads.csv --series A \

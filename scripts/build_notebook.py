@@ -964,7 +964,7 @@ md(r"""
 """)
 
 code(r'''
-print(f"nohup python {SCRIPTS_DIR}/dock_warheads_pcsk9.py \\")
+print(f"nohup python -u {SCRIPTS_DIR}/dock_warheads_pcsk9.py \\")
 print(f"    --site {PCSK9_SITE_JSON} \\")
 print(f"    --warheads-pdbqt {WARHEADS_PDBQT_DIR} \\")
 print(f"    --warheads-csv {WARHEADS_CSV} --series A \\")
