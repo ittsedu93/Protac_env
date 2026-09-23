@@ -159,7 +159,7 @@ warheads não têm pose conhecida — é o que esta fase produz.
 
 ```bash
 python scripts/prep_pcsk9_receptor.py \
-    --pdb-file ~/structures/6U26_1.pdb \
+    --pdb-file ~/structures/6U26.pdb \
     --outdir ~/PCSK9_docking --inspect-only
 ```
 
@@ -169,7 +169,7 @@ Confirme: cadeia A = 61–152 (pró-domínio), cadeia B = 153–682, HET `063`.
 
 ```bash
 python scripts/prep_pcsk9_receptor.py \
-    --pdb-file ~/structures/6U26_1.pdb \
+    --pdb-file ~/structures/6U26.pdb \
     --outdir ~/PCSK9_docking \
     --target-chain B --keep-chains A B \
     --site-mode ligand --ref-ligand-resname 063 \

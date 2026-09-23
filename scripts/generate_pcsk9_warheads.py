@@ -352,8 +352,18 @@ def main():
                 with Chem.SDWriter(str(out / "sdf" / f"{rec['warhead_id']}.sdf")) as w:
                     w.write(mol3d)
 
+                # O átomo dummy [*] não tem tipo nem em MMFF nem em UFF, então
+                # o RDKit despeja um UFFTYPER por confôrmero. É esperado e não
+                # afeta a geometria dos átomos reais — silenciado para não
+                # afogar avisos que importam.
+                try:
+                    from rdkit import rdBase
+                    _silencio = rdBase.BlockLogs()
+                except (ImportError, AttributeError):
+                    _silencio = None
                 dummy3d, _ = embed_best_conformer(
                     make_dummy_variant(mol_ord), max(10, args.n_confs // 5), args.seed)
+                del _silencio
                 if dummy3d is not None:
                     dummy3d.SetProp("_Name", f"{rec['warhead_id']}_dummy")
                     dummy3d.SetProp("warhead_id", rec["warhead_id"])
