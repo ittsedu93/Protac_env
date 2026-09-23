@@ -20,8 +20,16 @@ Para reconstruir a v2 depois de editar: `python scripts/build_notebook.py`.
 Antes de tudo, uma vez:
 
 ```bash
-conda activate pf_vs && pip install vina==1.2.7    # não está instalado
+# o env pf_vs pode não ter pip próprio; instale-o primeiro e use -m pip
+conda install -n pf_vs -y -c conda-forge pip
+conda run -n pf_vs python -m pip install vina==1.2.7
+conda run -n pf_vs python -c "import vina; print('vina ok', vina.__version__)"
 ```
+
+**Não rode isso numa célula do notebook.** `conda activate` não muda o
+interpretador de um kernel que já está no ar, e num cell o IPython transforma
+`conda ...` em `%conda`, que devolve `CondaError: Run 'conda init' before
+'conda activate'`. Terminal do VS Code, sempre.
 
 ---
 

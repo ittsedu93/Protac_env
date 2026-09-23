@@ -2,7 +2,9 @@
 """
 Etapa 3.0b — docking dos warheads PCSK9 e produção dos `Heads` do PRosettaC.
 
-Roda no env `pf_vs` (precisa de `vina`; `pip install vina==1.2.7`).
+Roda no env `pf_vs` (precisa de `vina`):
+    conda install -n pf_vs -y -c conda-forge pip
+    conda run -n pf_vs python -m pip install vina==1.2.7
 Lê o `pcsk9_site.json` escrito por `prep_pcsk9_receptor.py`.
 
     conda activate pf_vs
