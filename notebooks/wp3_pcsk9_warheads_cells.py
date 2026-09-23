@@ -20,7 +20,7 @@ import sys
 
 import pandas as pd
 from rdkit import Chem
-from rdkit.Chem import AllChem
+from rdkit.Chem import AllChem, Descriptors, rdMolDescriptors
 
 sys.path.insert(0, str(Path.home() / "Protac_env" / "scripts"))
 from wp2_linker_tools import assemble_protac, find_dummy, WARHEAD_ISOTOPE
@@ -138,13 +138,18 @@ print(f"python scripts/prep_pcsk9_receptor.py \\\n"
 # para moléculas de 230–420 Da.
 
 # %%
-# Depois de rodar o 3.0a, carregue o sítio e confira:
-site = json.loads(PCSK9_SITE_JSON.read_text())
-print("centro         :", site["center"])
-print("box (Å)        :", site["box_size"])
-print("vetor de saída :", site["exit_vector"], f"({site['exit_arm_length_A']} Å)")
-print("contatos       :", len(site["contact_residues"]), "resíduos")
-print("origem         :", site["provenance"])
+# Rode esta célula DEPOIS do 3.0a — antes disso o JSON ainda não existe.
+site = None
+if PCSK9_SITE_JSON.exists():
+    site = json.loads(PCSK9_SITE_JSON.read_text())
+    print("centro         :", site["center"])
+    print("box (Å)        :", site["box_size"])
+    print("vetor de saída :", site["exit_vector"], f"({site['exit_arm_length_A']} Å)")
+    print("contatos       :", len(site["contact_residues"]), "resíduos")
+    print("origem         :", site["provenance"])
+else:
+    print(f"ainda não existe: {PCSK9_SITE_JSON}")
+    print("rode o comando da célula 3.0a no terminal (env mdtools) primeiro.")
 
 # %% [markdown]
 # ### 3.0b Validação do protocolo (env `pf_vs`) — **passe por aqui antes da triagem**
