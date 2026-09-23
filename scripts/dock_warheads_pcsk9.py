@@ -40,7 +40,8 @@ from pathlib import Path
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from rmsd_inplace import rmsd_inplace, buried_atom_indices  # noqa: E402
+from rmsd_inplace import (rmsd_inplace, buried_atom_indices,  # noqa: E402
+                          truncate_to_core)
 from docking_engines import (dock_batch, check_engine, parse_pdbqt_score,  # noqa: E402
                              VINA, UNIDOCK)
 
@@ -115,41 +116,80 @@ def receptor_heavy_coords(receptor_pdb: Path) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
+def fraction_in_box(coords, center, box_size) -> float:
+    """Fração dos átomos que cabe no box de busca."""
+    c = np.asarray(center, dtype=float)
+    b = np.asarray(box_size, dtype=float) / 2.0
+    dentro = ((coords >= c - b) & (coords <= c + b)).all(axis=1)
+    return float(dentro.mean())
+
+
 def validate_protocol(site: dict, out_dir: Path, exhaustiveness: int,
                       engine: str = UNIDOCK, n_runs: int = 5, **kw) -> bool:
-    """Redocking do ligante co-cristalizado.
+    """Redocking do ligante co-cristalizado, recortado ao núcleo ancorado.
 
-    Dois números: RMSD do núcleo enterrado (o que decide) e RMSD do ligante
-    inteiro (informativo). O `063` tem um braço de ~15 Å no solvente que o
-    docking não tem como reproduzir e que não faz parte do que se está
-    validando — reprovar por causa dele seria reprovar o protocolo errado.
+    Por que recortar: o box é dimensionado para o NÚCLEO do ligante, que é o
+    tamanho certo para os warheads (230-420 Da). Redockar o ligante INTEIRO
+    nesse box é um teste impossível — no 6U26, 19 dos 76 átomos da pose
+    cristalográfica caem fora do box, então a pose correta não é sequer
+    alcançável e o docking é forçado a dobrar o braço de solvente para dentro.
+    O resultado é um RMSD alto que não diz nada sobre o protocolo, depois de
+    uma busca longa em 31 torções.
+
+    Recortado ao núcleo (anéis inteiros, valências capeadas), o fragmento cabe
+    no box, tem poucas torções e mede exatamente o que interessa: se o
+    protocolo reproduz a ancoragem observada no cristal.
     """
     from rdkit import Chem
 
     ref_sdf = site.get("ref_ligand_sdf")
-    ref_pdbqt = site.get("ref_ligand_pdbqt")
-    if not ref_sdf or not ref_pdbqt:
+    if not ref_sdf:
         print("Sem ligante de referência no site.json — o protocolo NÃO pode")
         print("ser validado por redocking. Rode prep_pcsk9_receptor.py com")
         print("--site-mode ligand, ou assuma explicitamente o risco na tese.")
         return False
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    ref = Chem.MolFromMolFile(str(ref_sdf), removeHs=True)
-    if ref is None:
+    ref_full = Chem.MolFromMolFile(str(ref_sdf), removeHs=True)
+    if ref_full is None:
         raise SystemExit(f"não consegui ler {ref_sdf}")
 
     rec_xyz = receptor_heavy_coords(Path(site["receptor_pdb"]))
-    core = buried_atom_indices(ref, rec_xyz,
+    frac = fraction_in_box(ref_full.GetConformer().GetPositions(),
+                           site["center"], site["box_size"])
+    print(f"  ligante de referência: {ref_full.GetNumHeavyAtoms()} átomos "
+          f"pesados, {frac * 100:.0f}% dentro do box")
+
+    core = buried_atom_indices(ref_full, rec_xyz,
                                threshold=site.get("burial_threshold", 20))
-    print(f"  núcleo enterrado: {len(core)}/{ref.GetNumAtoms()} átomos pesados")
+    if len(core) < 3:
+        raise SystemExit("núcleo enterrado pequeno demais para validar")
+
+    ref = truncate_to_core(ref_full, core)
+    ref_heavy = Chem.RemoveHs(ref)
+    frac_core = fraction_in_box(ref_heavy.GetConformer().GetPositions(),
+                                site["center"], site["box_size"])
+    print(f"  recortado ao núcleo  : {ref_heavy.GetNumHeavyAtoms()} átomos "
+          f"pesados, {frac_core * 100:.0f}% dentro do box")
+
+    if frac_core < 1.0:
+        raise SystemExit(
+            f"mesmo recortado, {(1 - frac_core) * 100:.0f}% do núcleo fica fora "
+            f"do box — aumente --box-pad no prep_pcsk9_receptor.py")
+
+    core_sdf = out_dir / "ref_core.sdf"
+    with Chem.SDWriter(str(core_sdf)) as w:
+        w.write(ref)
+    core_pdbqt = out_dir / "ref_core.pdbqt"
+    subprocess.run([OBABEL_EXE, str(core_sdf), "-O", str(core_pdbqt)],
+                   check=True, capture_output=True)
 
     results = []
     for seed in range(1, n_runs + 1):
-        score, pose_pdbqt = dock_one(engine, site, ref_pdbqt, seed,
+        score, pose_pdbqt = dock_one(engine, site, core_pdbqt, seed,
                                      exhaustiveness,
                                      out_dir / f"redock_seed{seed}",
-                                     lig_id="ref", **kw)
+                                     lig_id="ref_core", **kw)
         if score is None:
             print(f"  seed {seed}: o motor não produziu pose")
             continue
@@ -159,14 +199,12 @@ def validate_protocol(site: dict, out_dir: Path, exhaustiveness: int,
             print(f"  seed {seed}: não consegui ler a pose")
             continue
         try:
-            rmsd_core = rmsd_inplace(probe, ref, atom_indices=core)
-            rmsd_full = rmsd_inplace(probe, ref)
+            rmsd = rmsd_inplace(probe, ref_heavy)
         except ValueError as exc:
             print(f"  seed {seed}: RMSD falhou — {exc}")
             continue
-        results.append((seed, score, rmsd_core, rmsd_full))
-        print(f"  seed {seed}: score {score:7.2f} kcal/mol | "
-              f"RMSD núcleo {rmsd_core:5.2f} Å | ligante inteiro {rmsd_full:5.2f} Å")
+        results.append((seed, score, rmsd))
+        print(f"  seed {seed}: score {score:7.2f} kcal/mol | RMSD {rmsd:5.2f} Å")
 
     if not results:
         print("\nNenhum redocking mensurável — protocolo NÃO validado.")
@@ -174,7 +212,7 @@ def validate_protocol(site: dict, out_dir: Path, exhaustiveness: int,
 
     best = min(r[2] for r in results)
     ok = best <= REDOCK_RMSD_CUTOFF
-    print(f"\n  melhor RMSD de núcleo: {best:.2f} Å "
+    print(f"\n  melhor RMSD do núcleo: {best:.2f} Å "
           f"(corte {REDOCK_RMSD_CUTOFF} Å) -> "
           f"{'VALIDADO' if ok else 'NAO VALIDADO'}")
     if not ok:
@@ -182,10 +220,12 @@ def validate_protocol(site: dict, out_dir: Path, exhaustiveness: int,
         print("  receptor e o exhaustiveness antes de dockar a série.")
 
     (out_dir / "validation.json").write_text(json.dumps(
-        {"cutoff": REDOCK_RMSD_CUTOFF, "best_core_rmsd": best, "validated": ok,
-         "n_core_atoms": len(core),
-         "runs": [{"seed": s, "score": sc, "rmsd_core": rc, "rmsd_full": rf}
-                  for s, sc, rc, rf in results]}, indent=2))
+        {"cutoff": REDOCK_RMSD_CUTOFF, "best_rmsd": best, "validated": ok,
+         "ref_full_heavy_atoms": ref_full.GetNumHeavyAtoms(),
+         "ref_core_heavy_atoms": ref_heavy.GetNumHeavyAtoms(),
+         "ref_full_fraction_in_box": round(frac, 3),
+         "runs": [{"seed": s, "score": sc, "rmsd": r}
+                  for s, sc, r in results]}, indent=2))
     return ok
 
 

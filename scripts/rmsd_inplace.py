@@ -97,6 +97,48 @@ def buried_atom_indices(mol, receptor_xyz: np.ndarray,
     return [int(i) for i in np.where((d <= radius).sum(axis=1) >= threshold)[0]]
 
 
+# ---------------------------------------------------------------------------
+def expand_core_to_rings(mol, core_idx: list[int]) -> list[int]:
+    """Estende a seleção para anéis inteiros.
+
+    Truncar um anel aromático pela metade produz um fragmento que não
+    kekuliza. Qualquer anel com pelo menos um átomo no núcleo entra inteiro.
+    """
+    sel = set(core_idx)
+    for anel in mol.GetRingInfo().AtomRings():
+        if sel & set(anel):
+            sel |= set(anel)
+    return sorted(sel)
+
+
+def truncate_to_core(mol, core_idx: list[int]):
+    """Recorta a molécula aos átomos do núcleo, capeando as valências abertas.
+
+    Serve para validar o protocolo de docking quando o ligante
+    co-cristalizado tem partes que não cabem no box: redockar a molécula
+    inteira num box dimensionado para o núcleo força uma pose errada, porque
+    a pose cristalográfica simplesmente não cabe ali.
+
+    Devolve o maior fragmento conectado, com hidrogênios e coordenadas 3D
+    herdadas do cristal.
+    """
+    sel = set(expand_core_to_rings(mol, core_idx))
+    rw = Chem.RWMol(mol)
+    for idx in sorted(set(range(mol.GetNumAtoms())) - sel, reverse=True):
+        rw.RemoveAtom(idx)
+    frag = rw.GetMol()
+
+    # as valências abertas viram hidrogênios implícitos na sanitização
+    for atom in frag.GetAtoms():
+        atom.SetNoImplicit(False)
+        atom.SetNumRadicalElectrons(0)
+    Chem.SanitizeMol(frag)
+
+    pedacos = Chem.GetMolFrags(frag, asMols=True, sanitizeFrags=True)
+    maior = max(pedacos, key=lambda m: m.GetNumHeavyAtoms())
+    return Chem.AddHs(maior, addCoords=True)
+
+
 if __name__ == "__main__":
     # auto-teste: demonstra a diferença contra GetBestRMS
     from rdkit.Chem import AllChem, rdMolAlign
