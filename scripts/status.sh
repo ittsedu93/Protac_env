@@ -42,7 +42,7 @@ done
 # --- 3. dentro da MD -------------------------------------------------------
 echo -e "\nMD, etapa por etapa:"
 for f in protac.pdb complexo.pdb PTC.acpype/PTC_GMX.itp topol.top complexo.gro \
-         neutro.gro grupos.ndx em.gro nvt.gro npt.gro; do
+         neutro.gro grupos.ndx em.gro em2.gro warm.gro nvt.gro npt.gro; do
   printf "  %s %s\n" "$([[ -s "$MD/$f" ]] && echo '[x]' || echo '[ ]')" "$f"
 done
 

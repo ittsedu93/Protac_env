@@ -40,6 +40,10 @@ RESNAME=$(jq_ resname); LIG_PDB=$(jq_ lig_pdb); RECEPTOR=$(jq_ receptor_pdb)
 
 # parâmetros da metodologia
 TEMP=310; PRESSAO=1.0; DT=0.002
+# dt cresce ao longo do equilíbrio. Partir de 2 fs num sistema recém-montado é
+# pedir estouro: o solvente ainda não acomodou e o PROTAC tem 19 torções.
+DT_WARM=0.0005; DT_NVT=0.001
+NS_WARM=0.02
 # Nomes dos grupos de acoplamento térmico. Fixos de propósito: NÃO derivam do
 # nome do resíduo, porque o resíduo escrito nas coordenadas ($RESNAME para o
 # acpype, mas UNL no .gro) não é confiável. O build_index.py garante que
@@ -175,12 +179,35 @@ fi
 
 # --- 4. .mdp da metodologia ------------------------------------------------
 echo -e "\n[4/6] escrevendo .mdp"
+
 comum="cutoff-scheme = Verlet
 coulombtype = PME
 rvdw = $RC
 rcoulomb = $RC
 constraints = h-bonds
-constraint-algorithm = LINCS"
+constraint-algorithm = LINCS
+lincs-order = 8
+lincs-iter = 2"
+
+# A MINIMIZAÇÃO é outra história. Vínculos ligados e água rígida fazem o LINCS
+# tentar satisfazer restrições enquanto a geometria ainda está tensa — fonte
+# clássica de estouro. Minimiza-se com tudo flexível; os vínculos entram depois.
+comum_em="cutoff-scheme = Verlet
+coulombtype = PME
+rvdw = $RC
+rcoulomb = $RC
+constraints = none
+define = -DFLEXIBLE"
+
+# Dois termostatos, de propósito. O Nose-Hoover é o da metodologia e fica na
+# PRODUÇÃO, que é onde ele importa: ele reproduz o ensemble canônico
+# corretamente, mas não é robusto longe do equilíbrio — oscila, e num sistema
+# recém-solvatado a oscilação vira estouro. O equilíbrio usa V-rescale, que é
+# dissipativo e perdoa geometria ruim.
+acopl_eq="tcoupl = V-rescale
+tc-grps = ${GRP_SOLUTOS} ${GRP_SOLVENTE}
+tau-t = 0.1 0.1
+ref-t = $TEMP $TEMP"
 acopl="tcoupl = Nose-Hoover
 tc-grps = ${GRP_SOLUTOS} ${GRP_SOLVENTE}
 tau-t = 1.0 1.0
@@ -191,14 +218,34 @@ tau-p = 2.0
 ref-p = $PRESSAO
 compressibility = 4.5e-5"
 
-printf "integrator = steep\nemtol = 1000.0\nemstep = 0.01\nnsteps = 50000\n%s\n" "$comum" > em.mdp
-printf "integrator = md\ndt = %s\nnsteps = %d\n%s\n%s\npcoupl = no\ngen-vel = yes\ngen-temp = %s\ndefine = -DPOSRES\n" \
-    "$DT" "$(python3 -c "print(int($NS_NVT*1000/$DT))")" "$comum" "$acopl" "$TEMP" > nvt.mdp
-printf "integrator = md\ndt = %s\nnsteps = %d\n%s\n%s\n%s\ngen-vel = no\ndefine = -DPOSRES\n" \
-    "$DT" "$(python3 -c "print(int($NS_NPT*1000/$DT))")" "$comum" "$acopl" "$pacopl" > npt.mdp
+# ATENÇÃO às unidades: `passos` recebe NANOssegundos, `passos_ps` recebe
+# PICOssegundos. Confundir as duas escreve nstxout-compressed = 1e8 num run de
+# 1e8 passos — um único frame em 200 ns, e a análise sem nada para medir.
+passos() { python3 -c "print(int($1*1000/$2))"; }
+passos_ps() { python3 -c "print(int($1/$2))"; }
+
+# 1) minimização grosseira, e 2) uma fina que tira a tensão que sobrou
+printf "integrator = steep\nemtol = 1000.0\nemstep = 0.01\nnsteps = 50000\n%s\n" \
+    "$comum_em" > em.mdp
+printf "integrator = steep\nemtol = 100.0\nemstep = 0.001\nnsteps = 50000\n%s\n" \
+    "$comum_em" > em2.mdp
+
+# 3) aquecimento: dt de 0,5 fs partindo de 100 K, com o soluto preso
+printf "integrator = md\ndt = %s\nnsteps = %d\n%s\n%s\npcoupl = no\ngen-vel = yes\ngen-temp = 100\ndefine = -DPOSRES\n" \
+    "$DT_WARM" "$(passos "$NS_WARM" "$DT_WARM")" "$comum" "$acopl_eq" > warm.mdp
+
+# 4) NVT a 1 fs, continuando o aquecimento
+printf "integrator = md\ndt = %s\nnsteps = %d\n%s\n%s\npcoupl = no\ngen-vel = no\ncontinuation = yes\ndefine = -DPOSRES\n" \
+    "$DT_NVT" "$(passos "$NS_NVT" "$DT_NVT")" "$comum" "$acopl_eq" > nvt.mdp
+
+# 5) NPT a 2 fs, ainda com V-rescale e o soluto preso
+printf "integrator = md\ndt = %s\nnsteps = %d\n%s\n%s\n%s\ngen-vel = no\ncontinuation = yes\ndefine = -DPOSRES\n" \
+    "$DT" "$(passos "$NS_NPT" "$DT")" "$comum" "$acopl_eq" "$pacopl" > npt.mdp
+
+# 6) produção: aqui sim Nose-Hoover + Parrinello-Rahman, sem restrições
 printf "integrator = md\ndt = %s\nnsteps = %d\n%s\n%s\n%s\ngen-vel = no\nnstxout-compressed = %d\nnstenergy = %d\n" \
-    "$DT" "$(python3 -c "print(int($NS_PROD*1000/$DT))")" "$comum" "$acopl" "$pacopl" \
-    "$(python3 -c "print(int($SAVE_PS/$DT))")" "$(python3 -c "print(int($SAVE_PS/$DT))")" > prod.mdp
+    "$DT" "$(passos "$NS_PROD" "$DT")" "$comum" "$acopl" "$pacopl" \
+    "$(passos_ps "$SAVE_PS" "$DT")" "$(passos_ps "$SAVE_PS" "$DT")" > prod.mdp
 
 # Grupos de acoplamento: proteína+ligante contra água+íons.
 #
@@ -300,24 +347,29 @@ etapa() {  # etapa <nome> <mdp> <gro_entrada> [extra_grompp]
 echo -e "\n[5/6] minimização e equilíbrio"
 ESCADA=("${ESCADA_EM[@]}")
 etapa em  em.mdp  neutro.gro || { echo "*** minimização falhou"; exit 1; }
+etapa em2 em2.mdp em.gro    || { echo "*** minimização fina falhou"; exit 1; }
 
 # A minimização "termina" mesmo num sistema tenso. O Fmax final é o que
 # distingue relaxou de desistiu — entrar no NVT com Fmax na casa de 1e4
 # kJ/mol/nm é entrar num estouro, e o estouro custa minutos de GPU para dizer
 # o que esta linha diz em um segundo.
-if [[ -f em.log ]]; then
-  fmax=$(awk '/Maximum force/ {print $4; exit}' em.log)
-  conv=""; grep -q "converged to Fmax" em.log && conv=" (convergiu)"
+if [[ -f em2.log ]]; then
+  fmax=$(awk '/Maximum force/ {print $4; exit}' em2.log)
+  conv=""; grep -q "converged to Fmax" em2.log && conv=" (convergiu)"
   echo "      minimização: Fmax = ${fmax:-?} kJ/mol/nm${conv}"
-  if [[ -n "${fmax:-}" ]] && awk -v f="$fmax" 'BEGIN{exit !(f>5000)}'; then
+  if [[ -n "${fmax:-}" ]] && awk -v f="$fmax" 'BEGIN{exit !(f>1000)}'; then
     echo "      [ATENÇÃO] Fmax alto: o sistema segue tenso. Se o NVT estourar,"
     echo "      [ATENÇÃO] o problema é a geometria de partida, não o NVT."
   fi
 fi
 
 ESCADA=("${ESCADA_MD[@]}")
-etapa nvt nvt.mdp em.gro -r em.gro || { echo "*** NVT falhou"; exit 1; }
-etapa npt npt.mdp nvt.gro -r nvt.gro -t nvt.cpt || { echo "*** NPT falhou"; exit 1; }
+# A referência das restrições de posição é sempre a estrutura minimizada, não a
+# etapa anterior: encadear referências deixa o soluto derivar de degrau em
+# degrau e chegar na produção longe de onde o docking o colocou.
+etapa warm warm.mdp em2.gro -r em2.gro || { echo "*** aquecimento falhou"; exit 1; }
+etapa nvt nvt.mdp warm.gro -r em2.gro -t warm.cpt || { echo "*** NVT falhou"; exit 1; }
+etapa npt npt.mdp nvt.gro  -r em2.gro -t nvt.cpt  || { echo "*** NPT falhou"; exit 1; }
 
 # --- 6. produção, N réplicas com sementes diferentes ----------------------
 echo -e "\n[6/6] produção — ${NS_PROD} ns x ${N_REP} réplicas"
