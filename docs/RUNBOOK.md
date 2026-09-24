@@ -414,3 +414,36 @@ Cada módulo roda sozinho e demonstra o defeito que corrige:
 python scripts/rmsd_inplace.py       # GetBestRMS dá 0,00 para pose a 25 Å
 python scripts/wp2_linker_tools.py   # filtro, montagem verificada, colocação
 ```
+
+---
+
+## O caderno de registro
+
+`notebooks/protac_pipeline_documentado.ipynb` conta o pipeline fase por fase:
+o que cada uma faz, por que faz assim, o que os resultados mostraram, e o
+catálogo dos erros encontrados (apêndice A). **Nenhuma célula escreve arquivos,
+roda docking ou toca na MD** — todas só leem as saídas do disco, então é seguro
+abrir e executar com a simulação rodando na mesma máquina.
+
+Para regerá-lo depois de mudar algo:
+
+```bash
+python scripts/build_docs_notebook.py
+```
+
+## Grupos de acoplamento da MD
+
+Os `tc-grps` dos `.mdp` usam nomes **fixos** — `Protein_LIG` e
+`Water_and_ions` — e não o nome do resíduo do ligante. Isto é deliberado: o
+acpype batiza a *moleculetype* como se pede em `-b` (`PTC`), mas propaga para o
+`.gro` o resíduo que veio do PDB do RDKit, que é `UNL`. Procurar um
+`Protein_PTC` no índice falha sempre.
+
+`scripts/build_index.py` roda o `make_ndx` só para listar, acha proteína, água,
+íons e ligante **pelos nomes**, monta as fusões com os números reais e verifica
+o índice antes de aceitá-lo: os dois grupos têm de existir e somar o sistema
+inteiro. Roda sozinho, se precisar:
+
+```bash
+python scripts/build_index.py --gro neutro.gro --out grupos.ndx
+```
