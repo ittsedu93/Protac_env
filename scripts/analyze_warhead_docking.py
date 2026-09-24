@@ -199,8 +199,26 @@ def main():
         print(f"\n{(~ok_exp).sum()} candidatos têm o N enterrado: não há por onde")
         print("o linker sair, e eles morreriam no WP2.")
 
+    # taxa de aprovação por grupo R — responde "qual R3 apresenta o N para fora?"
+    df["viavel"] = ok_exp & ok_ali & df["pose_estavel"]
+    print("\ntaxa de aprovação nos três critérios, por grupo R:")
+    for coluna in ("r3", "r2", "r1"):
+        if coluna not in df.columns:
+            continue
+        tab = df.groupby(coluna).agg(
+            n=("warhead_id", "size"),
+            exposto=("n_exposto", "mean"),
+            alinhado=("alinhado_com_063", "mean"),
+            estavel=("pose_estavel", "mean"),
+            viavel=("viavel", "mean"),
+        )
+        for c in ("exposto", "alinhado", "estavel", "viavel"):
+            tab[c] = (tab[c].astype(float) * 100).round(0)
+        print(f"\n--- {coluna.upper()} (% dos candidatos) ---")
+        print(tab.sort_values("viavel", ascending=False).to_string())
+
     # ---------------- priorização ----------------
-    viaveis = df[ok_exp & ok_ali & df["pose_estavel"]].copy()
+    viaveis = df[df["viavel"]].copy()
     print("\n" + "=" * 66)
     print(f"4. Priorização — {len(viaveis)}/{len(df)} passam nos três critérios")
     print("=" * 66)
