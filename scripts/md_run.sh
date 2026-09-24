@@ -57,6 +57,18 @@ LIG_GRO="$MD_DIR/${RESNAME}.acpype/${RESNAME}_GMX.gro"
 
 # --- 2. topologia da proteína ---------------------------------------------
 if [[ ! -f topol.top ]]; then
+  # Cristais têm cadeias laterais parcialmente resolvidas. O pdb2gmx recusa
+  # a estrutura ("Incomplete ring in HIS68"), então completa antes.
+  REC_FIX="$MD_DIR/receptor_fixed.pdb"
+  if [[ ! -f "$REC_FIX" ]]; then
+    echo -e "\n[2/6] completando resíduos incompletos do receptor"
+    python "$(dirname "$0")/fix_receptor_for_md.py" \
+        --receptor "$RECEPTOR" --ligante "$MD_DIR/protac.sdf" \
+        --out "$REC_FIX" || {
+      echo "*** não foi possível completar o receptor"; exit 1; }
+  fi
+  RECEPTOR="$REC_FIX"
+
   echo -e "\n[2/6] pdb2gmx — AMBER ff14SB + TIP3P"
   "$GMX" pdb2gmx -f "$RECEPTOR" -ff amber14sb -water tip3p \
       -o proteina.gro -p topol.top -i posre_prot.itp -ignh \
