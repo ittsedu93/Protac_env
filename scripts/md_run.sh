@@ -26,6 +26,15 @@ GMX="${GMX_EXE:-/usr/local/gromacs/bin/gmx}"
 ACPYPE="${ACPYPE_EXE:-/home/soberano/miniconda3/envs/mdtools/bin/acpype}"
 
 jq_() { python3 -c "import json;print(json.load(open('$INFO'))['$1'])"; }
+
+# Roda um comando e confere que o arquivo esperado nasceu. Sem isto, um gmx
+# que falha deixa o script seguir e todos os passos seguintes reclamam de
+# "file does not exist" — o erro que aparece é o último, não o primeiro.
+gmx_ok() {
+  local saida="$1"; shift
+  "$@" || { echo "*** falhou: $*"; exit 1; }
+  [[ -s "$saida" ]] || { echo "*** $* não produziu $saida"; exit 1; }
+}
 CAND=$(jq_ candidate_id); CARGA=$(jq_ carga_formal)
 RESNAME=$(jq_ resname); LIG_PDB=$(jq_ lig_pdb); RECEPTOR=$(jq_ receptor_pdb)
 
@@ -45,10 +54,13 @@ echo "=============================================================="
 cd "$MD_DIR"
 
 # --- 1. parametrização do ligante (GAFF2 + AM1-BCC) -----------------------
-if [[ ! -f "${RESNAME}.acpype/${RESNAME}_GMX.itp" ]]; then
+if [[ ! -s "${RESNAME}.acpype/${RESNAME}_GMX.itp" ]] || \
+   [[ ! -s "${RESNAME}.acpype/${RESNAME}_GMX.gro" ]]; then
   echo -e "\n[1/6] acpype — GAFF2/AM1-BCC (passo longo, ~10-40 min)"
   "$ACPYPE" -i "$LIG_PDB" -b "$RESNAME" -n "$CARGA" -a gaff2 -c bcc -o gmx \
     || { echo "*** acpype falhou. Carga formal ($CARGA) está correta?"; exit 1; }
+  [[ -s "${RESNAME}.acpype/${RESNAME}_GMX.itp" ]] \
+    || { echo "*** acpype terminou sem gerar o .itp"; exit 1; }
 else
   echo -e "\n[1/6] acpype — já feito, pulando"
 fi
@@ -56,7 +68,12 @@ ITP="$MD_DIR/${RESNAME}.acpype/${RESNAME}_GMX.itp"
 LIG_GRO="$MD_DIR/${RESNAME}.acpype/${RESNAME}_GMX.gro"
 
 # --- 2. topologia da proteína ---------------------------------------------
-if [[ ! -f topol.top ]]; then
+# A guarda olha complexo.gro, a saída FINAL desta etapa. Guardar por
+# topol.top é errado: o pdb2gmx cria o arquivo antes de terminar, então uma
+# execução que falhou no meio deixa topol.top no disco e a retomada pula a
+# etapa inteira achando que deu certo.
+if [[ ! -s complexo.gro ]]; then
+  rm -f topol.top proteina.gro posre_prot.itp
   # Cristais têm cadeias laterais parcialmente resolvidas. O pdb2gmx recusa
   # a estrutura ("Incomplete ring in HIS68"), então completa antes.
   REC_FIX="$MD_DIR/receptor_fixed.pdb"
@@ -70,9 +87,8 @@ if [[ ! -f topol.top ]]; then
   RECEPTOR="$REC_FIX"
 
   echo -e "\n[2/6] pdb2gmx — AMBER ff14SB + TIP3P"
-  "$GMX" pdb2gmx -f "$RECEPTOR" -ff amber14sb -water tip3p \
-      -o proteina.gro -p topol.top -i posre_prot.itp -ignh \
-    || { echo "*** pdb2gmx falhou (resíduo não reconhecido?)"; exit 1; }
+  gmx_ok proteina.gro "$GMX" pdb2gmx -f "$RECEPTOR" -ff amber14sb \
+      -water tip3p -o proteina.gro -p topol.top -i posre_prot.itp -ignh
 
   # insere o ligante na topologia: #include depois dos includes do campo,
   # e a linha da molécula no fim de [ molecules ]
@@ -110,12 +126,16 @@ fi
 # --- 3. caixa, solvente e íons --------------------------------------------
 if [[ ! -f neutro.gro ]]; then
   echo -e "\n[3/6] caixa cúbica (${BOX_NM} nm), TIP3P, neutralização"
-  "$GMX" editconf -f complexo.gro -o caixa.gro -c -d "$BOX_NM" -bt cubic
-  "$GMX" solvate -cp caixa.gro -cs spc216.gro -p topol.top -o solvatado.gro
+  gmx_ok caixa.gro "$GMX" editconf -f complexo.gro -o caixa.gro -c \
+      -d "$BOX_NM" -bt cubic
+  gmx_ok solvatado.gro "$GMX" solvate -cp caixa.gro -cs spc216.gro \
+      -p topol.top -o solvatado.gro
   printf "integrator = steep\nnsteps = 1\ncutoff-scheme = Verlet\ncoulombtype = PME\nrvdw = %s\nrcoulomb = %s\n" "$RC" "$RC" > ions.mdp
-  "$GMX" grompp -f ions.mdp -c solvatado.gro -p topol.top -o ions.tpr -maxwarn 2
+  gmx_ok ions.tpr "$GMX" grompp -f ions.mdp -c solvatado.gro -p topol.top \
+      -o ions.tpr -maxwarn 2
   echo SOL | "$GMX" genion -s ions.tpr -o neutro.gro -p topol.top \
       -pname NA -nname CL -neutral
+  [[ -s neutro.gro ]] || { echo "*** genion não produziu neutro.gro"; exit 1; }
 else
   echo -e "\n[3/6] solvatação — já feita, pulando"
 fi
@@ -151,11 +171,19 @@ printf "integrator = md\ndt = %s\nnsteps = %d\n%s\n%s\n%s\ngen-vel = no\nnstxout
 if [[ ! -f grupos.ndx ]]; then
   printf "1 | 13\nname 22 Protein_%s\n14 | 15\nname 23 Water_and_ions\nq\n" "$RESNAME" \
     | "$GMX" make_ndx -f neutro.gro -o grupos.ndx > make_ndx.log 2>&1 || true
-  grep -q "Protein_${RESNAME}" grupos.ndx 2>/dev/null || {
-    echo "      [ATENÇÃO] os índices dos grupos variam com o sistema."
-    echo "      Confira grupos.ndx: os tc-grps dos .mdp precisam existir nele."
-    echo "      Abra com: $GMX make_ndx -f neutro.gro"
-  }
+  if ! grep -q "Protein_${RESNAME}" grupos.ndx 2>/dev/null; then
+    echo "      os índices padrão não serviram; montando pelos nomes"
+    printf "\"Protein\" | \"%s\"\nname 0 Protein_%s\n\"Water\" | \"Ion\"\nname 0 Water_and_ions\nq\n" \
+        "$RESNAME" "$RESNAME" | "$GMX" make_ndx -f neutro.gro -o grupos.ndx \
+        >> make_ndx.log 2>&1 || true
+  fi
+  if ! grep -q "Protein_${RESNAME}" grupos.ndx 2>/dev/null; then
+    echo "*** não consegui montar os grupos de acoplamento."
+    echo "*** Rode à mão e salve como grupos.ndx:"
+    echo "***   $GMX make_ndx -f neutro.gro -o grupos.ndx"
+    echo "*** Precisa existir um grupo Protein_${RESNAME} e um Water_and_ions."
+    exit 1
+  fi
 fi
 
 # --- 5. minimização e equilíbrio ------------------------------------------
