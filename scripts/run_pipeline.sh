@@ -248,9 +248,28 @@ fi
 # ===========================================================================
 if quer 6; then
   head_ 6 "WP3 — montar PROTACs e emitir jobs"
+
+  # A fase 3 pode ter sido rodada à mão antes do pipeline existir, gravando o
+  # ranking no diretório do docking em vez de $PIPELINE_OUT. Procura nos dois,
+  # e se não achar em nenhum, refaz a análise (custa segundos).
+  RANKING="$PIPELINE_OUT/warhead_ranking.csv"
+  if [[ ! -f "$RANKING" ]]; then
+    ALT="$DOCKING_DIR/docking/warhead_ranking.csv"
+    if [[ -f "$ALT" ]]; then
+      log "  ranking encontrado em $ALT"
+      RANKING="$ALT"
+    else
+      log "  ranking ausente: refazendo a análise da fase 3"
+      run_in "$ENV_MDTOOLS" python "$REPO/scripts/analyze_warhead_docking.py" \
+          --docking "$DOCKING_DIR/docking" \
+          --site "$DOCKING_DIR/pcsk9_site.json" \
+          --warheads-csv "$WARHEADS_DIR/pcsk9_warheads.csv" \
+          --sd-max "$ANALISE_SD_MAX" --out "$RANKING"
+    fi
+  fi
   run_in "$ENV_MDTOOLS" python "$REPO/scripts/wp3_assemble_protacs.py" \
       --subcomplexes "$PIPELINE_OUT/wp2/subcomplexes" \
-      --warhead-ranking "$PIPELINE_OUT/warhead_ranking.csv" \
+      --warhead-ranking "$RANKING" \
       --warheads-sdf "$WARHEADS_DIR/sdf" \
       --heads-pcsk9 "$DOCKING_DIR/docking/heads_pcsk9" \
       --top-warheads "$N_WARHEADS_WP2" \

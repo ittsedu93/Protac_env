@@ -72,6 +72,59 @@ def atomos_farmacoforicos(mol):
             proibidos.setdefault(match[0], nome)
     return proibidos
 
+
+def _esqueleto(mol):
+    """Cópia com todas as ligações simples e sem aromaticidade."""
+    m = Chem.RWMol(mol)
+    for b in m.GetBonds():
+        b.SetBondType(Chem.BondType.SINGLE)
+        b.SetIsAromatic(False)
+    for a in m.GetAtoms():
+        a.SetIsAromatic(False)
+        a.SetNoImplicit(True)
+        a.SetNumExplicitHs(0)
+        a.SetFormalCharge(0)
+    out = m.GetMol()
+    try:
+        Chem.SanitizeMol(out, Chem.SanitizeFlags.SANITIZE_SYMMRINGS |
+                              Chem.SanitizeFlags.SANITIZE_ADJUSTHS)
+    except Exception:
+        pass
+    return out
+
+
+def farmacoforos_da_pose(pose, ref):
+    """Farmacóforos da pose, calculados na molécula de referência.
+
+    A pose vem de PDBQT, formato que não guarda ordem de ligação: na volta
+    para SDF as carbonilas viram ligações simples e os SMARTS de farmacóforo
+    deixam de casar. Pior que ficar cega, a guarda passa a produzir FALSOS
+    POSITIVOS — num análogo de talidomida com as ordens perdidas ela "detecta"
+    a hidroxila da hidroxiprolina da VHL.
+
+    Então os padrões são aplicados ao SDF preparado, que tem as ordens
+    corretas, e os índices são transferidos para a pose pelo casamento das
+    duas estruturas.
+    """
+    if ref is None or ref.GetNumAtoms() != pose.GetNumAtoms():
+        return atomos_farmacoforicos(pose), "pose (sem referência)", None
+
+    proibidos_ref = atomos_farmacoforicos(ref)
+    if not proibidos_ref:
+        return {}, "referência preparada", 0
+
+    # ref -> pose: match[i] é o índice na pose do átomo i da referência.
+    # O casamento é pelo ESQUELETO (conectividade e elemento, ordens de ligação
+    # zeradas), porque é exatamente a ordem de ligação que a pose perdeu.
+    match = (pose.GetSubstructMatch(ref)
+             or _esqueleto(pose).GetSubstructMatch(_esqueleto(ref)))
+    if not match:
+        return (atomos_farmacoforicos(pose),
+                "pose (as estruturas não casaram — guarda pouco confiável)",
+                len(proibidos_ref))
+    return ({match[i]: motivo for i, motivo in proibidos_ref.items()
+             if i < len(match)}, "referência preparada", len(proibidos_ref))
+
 # nomes prováveis das colunas nos CSVs do WP1, em ordem de preferência
 COLS_ID = ("ligand_id", "ligand", "name", "id", "mol_id", "molecule")
 COLS_SCORE = ("best_score", "score", "affinity", "vina_score", "energy")
@@ -229,7 +282,7 @@ def receptor_coords(receptor_pdb: Path) -> np.ndarray:
 
 # ---------------------------------------------------------------------------
 def exit_vector_do_recrutador(mol, rec_xyz: np.ndarray, burial: int = 20,
-                              raio: float = 6.0):
+                              raio: float = 6.0, mol_ref=None):
     """Ponto de conjugação e direção de saída, pelo enterramento dos átomos.
 
     A divisão núcleo/exposto usa percentis em vez de cortes absolutos: um
@@ -270,7 +323,7 @@ def exit_vector_do_recrutador(mol, rec_xyz: np.ndarray, burial: int = 20,
 
     # ponto de conjugação: entre os átomos expostos COM hidrogênio para ceder,
     # o mais afastado do núcleo ancorado — excluindo o farmacóforo
-    proibidos = atomos_farmacoforicos(mol)
+    proibidos, origem_guarda, n_ref = farmacoforos_da_pose(mol, mol_ref)
     candidatos = [int(i) for i in np.where(expostos)[0]
                   if mol.GetAtomWithIdx(int(i)).GetTotalNumHs() > 0]
     excluidos = [(i, proibidos[i]) for i in candidatos if i in proibidos]
@@ -300,6 +353,8 @@ def exit_vector_do_recrutador(mol, rec_xyz: np.ndarray, burial: int = 20,
         "burial_min_max": [int(nb.min()), int(nb.max())],
         "excluidos_por_farmacoforo": [{"atom_idx": i, "motivo": m}
                                       for i, m in excluidos],
+        "farmacoforos_no_recrutador": len(proibidos),
+        "guarda_calculada_em": origem_guarda,
     }
 
 
@@ -366,8 +421,15 @@ def main():
             if mol is None:
                 print(f"  [{lig_id}] pose ilegível: {pose}")
                 continue
+            ref_prep = None
+            for cand in (prep / "ligands" / f"{lig_id}.sdf", prep / f"{lig_id}.sdf"):
+                if cand.exists():
+                    ref_prep = Chem.MolFromMolFile(str(cand), removeHs=True)
+                    if ref_prep is not None:
+                        break
             try:
-                ev = exit_vector_do_recrutador(mol, rec_xyz, args.burial)
+                ev = exit_vector_do_recrutador(mol, rec_xyz, args.burial,
+                                               mol_ref=ref_prep)
             except SystemExit as exc:
                 print(f"  [{lig_id}] {exc}")
                 continue
@@ -375,8 +437,14 @@ def main():
             print(f"  [{lig_id}] score {score:.2f} | conjugação pelo átomo "
                   f"{ev['atom_idx']} ({ev['atom_symbol']}, {ev['atom_n_hs']} H) "
                   f"a {ev['dist_ao_nucleo_A']} Å do núcleo")
+            print(f"      farmacóforos: {ev['farmacoforos_no_recrutador']} "
+                  f"(via {ev['guarda_calculada_em']})")
             for ex in ev.get("excluidos_por_farmacoforo", []):
                 print(f"      [protegido] átomo {ex['atom_idx']}: {ex['motivo']}")
+            if ev["farmacoforos_no_recrutador"] == 0:
+                print(f"      [ATENÇÃO] nenhum farmacóforo reconhecido neste "
+                      f"recrutador: a guarda não está protegendo nada. "
+                      f"Confira manualmente antes de aceitar.")
 
             if e3 in resultados:
                 continue                       # guarda só o melhor por E3
