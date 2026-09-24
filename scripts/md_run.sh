@@ -347,6 +347,24 @@ etapa() {  # etapa <nome> <mdp> <gro_entrada> [extra_grompp]
 }
 
 echo -e "\n[5/6] minimização e equilíbrio"
+
+# A produção já começada é prova de que o equilíbrio foi feito. Se o npt.gro
+# tiver sido perdido (apagado por engano, disco cheio), ele é recuperável de
+# qualquer prod.tpr: o .tpr guarda o estado completo com que a réplica começou.
+# Recuperar é melhor que refazer — um equilíbrio novo geraria uma estrutura de
+# partida DIFERENTE da que as réplicas já rodadas usaram, e as réplicas
+# deixariam de ser o que a metodologia diz que são: mesmas coordenadas,
+# velocidades independentes.
+if [[ ! -s npt.gro ]] && compgen -G "rep*/prod.tpr" > /dev/null; then
+  TPR_REF=$(ls -1 rep*/prod.tpr | head -1)
+  echo "      npt.gro ausente, mas $TPR_REF existe — recuperando dele"
+  "$GMX" editconf -f "$TPR_REF" -o npt.gro || {
+    echo "*** não consegui recuperar npt.gro de $TPR_REF"; exit 1; }
+fi
+
+if [[ -s npt.gro ]]; then
+  echo "      equilíbrio — já feito, pulando"
+else
 ESCADA=("${ESCADA_EM[@]}")
 etapa em  em.mdp  neutro.gro || { echo "*** minimização falhou"; exit 1; }
 etapa em2 em2.mdp em.gro    || { echo "*** minimização fina falhou"; exit 1; }
@@ -372,6 +390,7 @@ ESCADA=("${ESCADA_MD[@]}")
 etapa warm warm.mdp em2.gro -r em2.gro || { echo "*** aquecimento falhou"; exit 1; }
 etapa nvt nvt.mdp warm.gro -r em2.gro -t warm.cpt || { echo "*** NVT falhou"; exit 1; }
 etapa npt npt.mdp nvt.gro  -r em2.gro -t nvt.cpt  || { echo "*** NPT falhou"; exit 1; }
+fi
 
 # --- 6. produção, N réplicas com sementes diferentes ----------------------
 echo -e "\n[6/6] produção — ${NS_PROD} ns x ${N_REP} réplicas"
@@ -381,7 +400,11 @@ for i in $(seq 1 "$N_REP"); do
   mkdir -p "$rep"
   seed=$((1000 + (i - 1) * 97))
   sed "s/^gen-vel = no/gen-vel = yes\ngen-seed = $seed\ngen-temp = $TEMP/" prod.mdp > "$rep/prod.mdp"
-  "$GMX" grompp -f "$rep/prod.mdp" -c npt.gro -t npt.cpt -p topol.top \
+  # O -t é dispensável: com gen-vel = yes e semente própria, as velocidades
+  # são geradas de novo. Exigir o checkpoint faria uma réplica falhar por falta
+  # de um arquivo cujo conteúdo ia ser descartado.
+  T_NPT=(); [[ -s npt.cpt ]] && T_NPT=(-t npt.cpt)
+  "$GMX" grompp -f "$rep/prod.mdp" -c npt.gro "${T_NPT[@]}" -p topol.top \
       -n grupos.ndx -o "$rep/prod.tpr" -maxwarn 5 || exit 1
   ( cd "$rep" && mdrun_ok prod ) || exit 1
   echo "      $rep concluída"
