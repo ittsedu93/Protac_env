@@ -326,9 +326,11 @@ mdrun_ok() {  # mdrun_ok <deffnm>
     sed -n "/^-\{20,\}$/,\$p" "$log" | head -30 | sed 's/^/      | /'
     if grep -qiE "LINCS WARNING|can not be settled|Too many LINCS" "$log"; then
       echo "      >>> Isto é INSTABILIDADE NUMÉRICA, não configuração: alguma"
-      echo "      >>> geometria do sistema está tensa. Suspeitos, em ordem: o"
-      echo "      >>> ligante encostado na proteína na pose de partida, uma"
-      echo "      >>> minimização que convergiu cedo, ou dt grande demais."
+      echo "      >>> geometria do sistema está tensa."
+      # "átomo 539" não diz nada; o resíduo diz tudo. Os índices são do
+      # sistema SOLVATADO, então o mapeamento sai do neutro.gro.
+      python "$(dirname "$0")/explain_lincs.py" --gro "$MD_DIR/neutro.gro" \
+          --log "$log" 2>/dev/null || true
     fi
     echo "      (completo em $MD_DIR/$log)"
     return 1
