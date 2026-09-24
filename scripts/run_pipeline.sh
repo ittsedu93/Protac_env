@@ -25,6 +25,7 @@ CONF="${PIPELINE_CONF:-$(dirname "$0")/../config/pipeline.conf}"
 [[ -f "$CONF" ]] || { echo "config não encontrada: $CONF"; exit 1; }
 # shellcheck disable=SC1090
 source "$CONF"
+OBABEL_EXE="${OBABEL_EXE:-/home/soberano/miniconda3/envs/obabel_env/bin/obabel}"
 
 FROM=1; ONLY=""; DRY=0
 while [[ $# -gt 0 ]]; do
@@ -149,23 +150,58 @@ else
 fi
 
 # ===========================================================================
-# FASE 4 — WP1: revalidar o portão de redocking do recrutador E3
+# FASE 4 — WP1: revalidar o portão e escolher o recrutador
 # ===========================================================================
 if quer 4; then
-  head_ 4 "Revalidar o redocking do WP1 (minutos)"
-  exige E3_RECEPTOR_PDB "Aponte o receptor da E3 ligase preparado no WP1."
-  exige E3_REF_LIGAND_SDF "Aponte o ligante co-cristalizado da E3 ligase."
-  exige E3_REDOCK_POSES "Aponte o glob das poses de redocking já geradas."
+  head_ 4 "WP1 — revalidar o redocking e escolher o recrutador (minutos)"
 
-  run_in "$ENV_MDTOOLS" python "$REPO/scripts/revalidate_redocking.py" \
-      --receptor-pdb "$E3_RECEPTOR_PDB" \
-      --ref-ligand "$E3_REF_LIGAND_SDF" \
-      --poses "$E3_REDOCK_POSES" \
-      --label "${E3_NAME:-E3}" \
-      --out "$PIPELINE_OUT/wp1_revalidation_${E3_NAME:-E3}.csv"
+  # 4a. revalida o portão de redocking de cada E3 com o RMSD correto.
+  #     Não interrompe o pipeline: o resultado é informativo e fica no log e
+  #     no CSV, para você decidir o que fazer com a triagem do WP1.
+  for E3 in $WP1_E3_LIST; do
+    D=$(find "$WP1_PREP" -maxdepth 1 -type d -name "${E3}*" | head -1)
+    [[ -z "$D" ]] && { log "  [${E3}] pasta não encontrada em $WP1_PREP"; continue; }
+    REF=$(find "$D" -name "*ref_ligand*.sdf" | head -1)
+    REC=$(find "$D" -name "*_receptor.pdb" | head -1)
+    if [[ -z "$REF" ]]; then
+      REFPDB=$(find "$D" -name "*ref_ligand*.pdb" | head -1)
+      if [[ -n "$REFPDB" ]]; then
+        log "  [${E3}] convertendo ligante de referência para SDF"
+        [[ $DRY -eq 0 ]] && "$OBABEL_EXE" "$REFPDB" -O "${REFPDB%.pdb}.sdf" -h \
+          >/dev/null 2>&1 && REF="${REFPDB%.pdb}.sdf"
+      fi
+    fi
+    if [[ -n "$REF" && -n "$REC" ]]; then
+      run_in "$ENV_MDTOOLS" python "$REPO/scripts/revalidate_redocking.py" \
+          --receptor-pdb "$REC" --ref-ligand "$REF" \
+          --poses "$D/redock*.pdbqt" --label "$E3" \
+          --out "$PIPELINE_OUT/wp1_revalidation_${E3}.csv" || \
+        log "  [${E3}] revalidação não concluiu — segue, o log tem o motivo"
+    else
+      log "  [${E3}] sem ligante de referência ou receptor; revalidação pulada"
+    fi
+  done
+
+  # 4b. escolhe o recrutador e extrai o exit vector da pose
+  run_in "$ENV_MDTOOLS" python "$REPO/scripts/wp1_select_recruiter.py" \
+      --screening "$WP1_SCREENING" --prep "$WP1_PREP" \
+      --e3 $WP1_E3_LIST --burial "$WP1_BURIAL" \
+      --out "$PIPELINE_OUT/wp1_recruiter.json"
   mark_done 4
 else
   log "\n[fase 4 pulada]"
+fi
+
+# --- lê o recrutador escolhido, a menos que você tenha forçado na config ---
+RJ="$PIPELINE_OUT/wp1_recruiter.json"
+if [[ -f "$RJ" ]]; then
+  ler_json() { python3 -c "import json,sys; d=json.load(open('$RJ'))['escolhido']; v=d.get('$1'); print(','.join(map(str,v)) if isinstance(v,list) else (v or ''))"; }
+  : "${E3_NAME:=$(ler_json e3)}"
+  : "${E3_RECRUITER_SDF:=$(ler_json recruiter_sdf)}"
+  : "${E3_EXIT_POINT:=$(ler_json exit_point)}"
+  : "${E3_EXIT_DIRECTION:=$(ler_json exit_direction)}"
+  : "${E3_RECEPTOR_PDB:=$(ler_json receptor_pdb)}"
+  log "\nrecrutador: $E3_NAME | exit point [$E3_EXIT_POINT] | direção [$E3_EXIT_DIRECTION]"
 fi
 
 # ===========================================================================
