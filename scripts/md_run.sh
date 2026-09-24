@@ -236,7 +236,17 @@ mdrun_ok() {  # mdrun_ok <deffnm>
       echo "      o GROMACS recusou este offload — tentando com menos GPU"
       continue
     fi
-    echo "      mdrun falhou por motivo que não é offload; veja $log"
+    # O erro do GROMACS já está no log, mas dezenas de linhas acima do fim —
+    # quem olha `tail` vê o rodapé e não a causa. Repete a causa AQUI, no fim.
+    echo "      mdrun falhou por motivo que não é offload. O erro do GROMACS:"
+    sed -n "/^-\{20,\}$/,\$p" "$log" | head -30 | sed 's/^/      | /'
+    if grep -qiE "LINCS WARNING|can not be settled|Too many LINCS" "$log"; then
+      echo "      >>> Isto é INSTABILIDADE NUMÉRICA, não configuração: alguma"
+      echo "      >>> geometria do sistema está tensa. Suspeitos, em ordem: o"
+      echo "      >>> ligante encostado na proteína na pose de partida, uma"
+      echo "      >>> minimização que convergiu cedo, ou dt grande demais."
+    fi
+    echo "      (completo em $MD_DIR/$log)"
     return 1
   done
   return 1
