@@ -795,7 +795,73 @@ sobre offload. Um erro de física (LINCS, explosão) falha de uma vez, porque
 repetir três vezes uma simulação que vai estourar de novo custaria horas por
 nada.
 
-### 8. Retomada de verdade na produção
+### 8. O equilíbrio partia longe demais do equilíbrio
+
+Com a cadeia corrigida, o NVT ainda estourava — mas por outra razão, e o log
+dizia qual se soubesse lê-lo:
+
+```
+Steepest Descents converged to Fmax < 1000 in 1576 steps
+Maximum force = 9.9462659e+02 on atom 570
+```
+
+A minimização convergiu **raspando**: 994,6 contra tolerância de 1000. E a
+força residual estava no átomo 570, enquanto a explosão começava nos átomos
+539–540 — mesma vizinhança. O sistema não estava globalmente tenso (−1,70×10⁶
+kJ/mol é normal para 111 mil átomos): havia um **nó local**, e o minimizador
+parou no instante em que cruzou o limiar, deixando-o intacto.
+
+Duas coisas erradas no protocolo, ambas de manual:
+
+**A minimização rodava com `constraints = h-bonds` e água rígida.** O padrão é
+minimizar com `constraints = none` e `define = -DFLEXIBLE`, justamente porque o
+LINCS tentando satisfazer vínculos numa geometria tensa é fonte clássica de
+estouro. Passou a haver duas: uma grossa (`emtol 1000`) e uma fina
+(`emtol 100`, `emstep 0.001`) que não deixa o minimizador parar raspando.
+
+**O NVT partia direto a 310 K com Nose-Hoover e `dt = 2 fs`.** O Nose-Hoover
+reproduz o ensemble canônico corretamente, mas **não é robusto longe do
+equilíbrio** — oscila, e num sistema recém-solvatado a oscilação vira estouro.
+O equilíbrio passou a usar **V-rescale**, que é dissipativo e perdoa geometria
+ruim, subindo `dt` em degraus:
+
+| etapa | dt | duração | termostato |
+|---|---|---|---|
+| `em` | — | `emtol 1000`, tudo flexível | — |
+| `em2` | — | `emtol 100` | — |
+| `warm` | 0,5 fs | 20 ps, partindo de 100 K | V-rescale |
+| `nvt` | 1 fs | 100 ps | V-rescale |
+| `npt` | 2 fs | 5 ns | V-rescale + Parrinello-Rahman |
+| `prod` | 2 fs | 200 ns × 3 | **Nose-Hoover** + Parrinello-Rahman |
+
+O Nose-Hoover da metodologia fica onde importa: na produção, que é o que vai
+para a tese. A escolha do termostato de equilíbrio é detalhe prático, e vale
+declará-lo como tal.
+
+Um efeito colateral que não era o objetivo: o `-update gpu` **aceita**
+V-rescale e recusa Nose-Hoover. Trocar o termostato do equilíbrio destravou o
+offload total da GPU nessas etapas, sem que a escada precisasse descer nenhum
+degrau.
+
+A referência das restrições de posição passou a ser sempre `em2.gro`, nunca a
+etapa anterior: encadear referências deixaria o soluto derivar degrau a degrau
+e chegar na produção longe da pose do docking.
+
+E um erro meu, pego em teste antes de rodar: reusei a função que converte ns em
+passos para o intervalo de gravação, que está em ps. Saía
+`nstxout-compressed = 1e8` num run de `1e8` passos — **um único frame em
+200 ns**, e a análise sem nada para medir. São duas funções agora, com a unidade
+no nome.
+
+### 9. "Átomo 539" não diz nada
+
+O GROMACS relata instabilidade por índice de átomo. `explain_lincs.py` mapeia os
+índices pelo `neutro.gro` e nomeia os resíduos, porque a correção depende de
+quem seja: água encravada é problema do `solvate` e dos raios de VdW adivinhados
+por nome de átomo; o ligante aponta para a geometria de partida do PROTAC; só
+proteína aponta para um rotâmero reconstruído preso num mínimo local.
+
+### 10. Retomada de verdade na produção
 
 200 ns × 3 réplicas é medido em dias. Havendo checkpoint, o `mdrun` retoma com
 `-cpi` em vez de recomeçar. Sem isso, uma queda na 190ª nanosegundo custaria a

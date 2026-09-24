@@ -46,6 +46,19 @@ for f in protac.pdb complexo.pdb PTC.acpype/PTC_GMX.itp topol.top complexo.gro \
   printf "  %s %s\n" "$([[ -s "$MD/$f" ]] && echo '[x]' || echo '[ ]')" "$f"
 done
 
+# --- 3b. progresso da etapa em andamento -----------------------------------
+# O mdrun escreve "step 3200, remaining wall clock time: 123 s" enquanto roda.
+# É a única estimativa honesta de quanto falta: vem do desempenho medido, não
+# de conta de padeiro.
+for f in "$MD"/mdrun_*.out; do
+  [[ -f "$f" ]] || continue
+  linha=$(grep -a "remaining wall clock" "$f" | tail -1)
+  if [[ -n "$linha" ]]; then
+    nome=$(basename "$f" .out); nome=${nome#mdrun_}
+    echo "  ${nome}: ${linha}"
+  fi
+done
+
 # --- 4. réplicas de produção ----------------------------------------------
 if compgen -G "$MD/rep*" > /dev/null; then
   echo -e "\nPRODUÇÃO (200 ns por réplica):"
