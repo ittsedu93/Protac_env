@@ -118,6 +118,53 @@ def carregar_mol(caminho: Path, tmp: Path):
     return None
 
 
+def identificar_no_catalogo(lig_id: str, mol, anchors_sdf: Path | None):
+    """Descobre QUAL composto do catálogo é o recrutador escolhido.
+
+    Sem isto o resultado é "ligand_042", que não serve para encomendar nada
+    nem para escrever na tese. O WP1 nomeou os ligantes por posição na
+    biblioteca (ligand_NNN), então NNN é o índice no SDF; a conferência por
+    contagem de átomos pesados garante que o índice não escorregou.
+    """
+    if not anchors_sdf or not Path(anchors_sdf).exists():
+        return {"catalogo": None}
+    try:
+        idx = int(str(lig_id).rsplit("_", 1)[-1])
+    except ValueError:
+        return {"catalogo": None, "catalogo_nota": "id não termina em número"}
+
+    supp = Chem.SDMolSupplier(str(anchors_sdf), removeHs=True)
+    if idx >= len(supp):
+        return {"catalogo": None,
+                "catalogo_nota": f"índice {idx} fora da biblioteca ({len(supp)})"}
+    cand = supp[idx]
+    if cand is None:
+        return {"catalogo": None, "catalogo_nota": f"molécula {idx} ilegível"}
+
+    props = {k: cand.GetProp(k) for k in cand.GetPropNames()}
+    nome = (cand.GetProp("_Name") if cand.HasProp("_Name") else "") or ""
+    for chave in ("IDNUMBER", "ID", "Catalog ID", "CSID", "Chemspace ID", "SMILES"):
+        if chave in props and not nome:
+            nome = props[chave]
+
+    bate = cand.GetNumHeavyAtoms() == mol.GetNumHeavyAtoms()
+    return {
+        "catalogo": {
+            "indice_no_sdf": idx,
+            "nome": nome or f"(sem nome, índice {idx})",
+            "smiles": Chem.MolToSmiles(cand),
+            "n_heavy_catalogo": cand.GetNumHeavyAtoms(),
+            "n_heavy_pose": mol.GetNumHeavyAtoms(),
+            "confere": bool(bate),
+            "propriedades": {k: v for k, v in list(props.items())[:10]},
+        },
+        "catalogo_nota": ("" if bate else
+                          "ATENÇÃO: contagem de átomos pesados difere entre a "
+                          "pose e a molécula do catálogo nesse índice — a "
+                          "correspondência por posição pode estar errada"),
+    }
+
+
 def receptor_coords(receptor_pdb: Path) -> np.ndarray:
     return np.array([(float(l[30:38]), float(l[38:46]), float(l[46:54]))
                      for l in Path(receptor_pdb).read_text().splitlines()
@@ -201,6 +248,9 @@ def main():
     ap.add_argument("--prep", type=Path, required=True)
     ap.add_argument("--e3", nargs="*", default=["VHL", "CRBN"])
     ap.add_argument("--burial", type=int, default=20)
+    ap.add_argument("--anchors-sdf", type=Path,
+                    help="biblioteca de anchors usada no WP1, para identificar "
+                         "o composto de catálogo correspondente")
     ap.add_argument("--top-n", type=int, default=3,
                     help="quantos do topo inspecionar por E3")
     ap.add_argument("--out", type=Path, required=True)
@@ -274,8 +324,18 @@ def main():
                 f"# confira se ele aponta para o solvente e se é um ponto de\n"
                 f"# acoplamento quimicamente razoável\n")
 
+            cat = identificar_no_catalogo(lig_id, mol, args.anchors_sdf)
+            if cat.get("catalogo"):
+                c = cat["catalogo"]
+                print(f"      catálogo: {c['nome']}  "
+                      f"({'confere' if c['confere'] else 'NÃO CONFERE'}: "
+                      f"{c['n_heavy_pose']} vs {c['n_heavy_catalogo']} átomos)")
+            if cat.get("catalogo_nota"):
+                print(f"      {cat['catalogo_nota']}")
+
             resultados[e3] = {
                 "e3": e3, "ligand_id": lig_id, "score": score,
+                **cat,
                 "pose": str(pose), "recruiter_sdf": str(sdf),
                 "receptor_pdb": str(rec_pdb),
                 "receptor_pdbqt": str(rec_pdb.with_suffix(".pdbqt")),
@@ -301,6 +361,9 @@ def main():
     print(f"ESCOLHIDO: {melhor['e3']} / {melhor['ligand_id']} "
           f"(score {melhor['score']:.2f})")
     print(f"{'=' * 60}")
+    if melhor.get("catalogo"):
+        print(f"  composto   : {melhor['catalogo']['nome']}")
+        print(f"  SMILES     : {melhor['catalogo']['smiles']}")
     print(f"  recrutador : {melhor['recruiter_sdf']}")
     print(f"  exit point : {melhor['exit_point']}")
     print(f"  direção    : {melhor['exit_direction']}")

@@ -4,7 +4,42 @@ Ordem de execução com env, tempo e critério de parada de cada etapa. Os passo
 marcados **[PORTÃO]** decidem se faz sentido seguir; os marcados **[PESADO]**
 vão para a workstation com `nohup`/SLURM, nunca no kernel do Jupyter.
 
-## Por onde entrar
+## Por onde entrar — pipeline automatizado
+
+Um comando roda tudo, e você pode desligar o notebook:
+
+```bash
+cd ~/Protac_env && git pull
+tmux new -s protac
+bash ~/Protac_env/scripts/run_pipeline.sh 2>&1 | tee ~/pipeline.log
+# Ctrl+B, depois D
+```
+
+Voltar: `tmux attach -t protac`. Estado: `run_pipeline.sh --list`.
+Retomar de uma fase: `run_pipeline.sh --from 5`.
+
+Toda a configuração fica em `config/pipeline.conf` — caminhos, envs, cortes.
+Os scripts não têm caminho fixo dentro deles.
+
+As seis fases: (1) warheads, (2) ancoragem na PCSK9, (3) análise,
+(4) revalidação do WP1 + escolha do recrutador, (5) WP2 linkers e
+sub-complexos, (6) WP3 montagem e jobs do PRosettaC. Cada uma grava um
+marcador e é pulada se já concluída; os scripts pesados são retomáveis por
+conta própria.
+
+Bibliotecas usadas: **apenas Chemspace** (257 anchors, 702 linkers). Para
+incluir o Enamine de volta, preencha `LINKERS_EXTRA` na config.
+
+### O que continua sendo seu
+
+- conferir o átomo de conjugação do recrutador (`conferir_<E3>.cxc`): a escolha
+  é heurística geométrica e não sabe química de acoplamento
+- rodar UM job de PRosettaC antes do lote e conferir o `Anchor atoms`
+- submeter os JSONs do AlphaFold 3
+
+---
+
+## Por onde entrar — notebook
 
 **`notebooks/protac_wp1_wp3_pipeline_v2.ipynb`** é o notebook integrado: já traz
 as células do original que continuam válidas, as correções do WP1/WP2 e a etapa

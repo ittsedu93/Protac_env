@@ -186,6 +186,7 @@ if quer 4; then
   run_in "$ENV_MDTOOLS" python "$REPO/scripts/wp1_select_recruiter.py" \
       --screening "$WP1_SCREENING" --prep "$WP1_PREP" \
       --e3 $WP1_E3_LIST --burial "$WP1_BURIAL" \
+      ${ANCHORS_SDF:+--anchors-sdf "$ANCHORS_SDF"} \
       --out "$PIPELINE_OUT/wp1_recruiter.json"
   mark_done 4
 else
