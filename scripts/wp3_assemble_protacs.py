@@ -102,6 +102,12 @@ def main():
         if sc_mol is None:
             print(f"  [ilegível] {sp.name}")
             continue
+        rad = sum(a.GetNumRadicalElectrons() for a in sc_mol.GetAtoms())
+        if rad:
+            print(f"  [DESCARTADO] {sp.stem}: {rad} elétrons radicalares — "
+                  f"a química do recrutador não foi reconstruída, e isto "
+                  f"quebraria o antechamber na MD")
+            continue
         sc_id = sp.stem
         for r in wh.itertuples():
             wid = r.warhead_id
@@ -157,21 +163,35 @@ def main():
         if not head_b.exists():
             print(f"  [sem Head] {r.warhead_id}")
             continue
-        # o Head veio de PDBQT e perdeu as ordens de ligação; o PRosettaC
-        # precisa da química certa, então corrige pelo SDF do gerador
+        # O Head veio de PDBQT e perdeu ordem de ligação e hidrogênio. Não
+        # adianta consertar a pose: parte-se do SDF do gerador, que tem a
+        # química certa, e transplantam-se as coordenadas do docking.
         corrigido = head_b.parent / f"{r.warhead_id}_in_pcsk9_bo.sdf"
         if not corrigido.exists():
             try:
-                from rdkit.Chem import AllChem
                 tmpl = Chem.MolFromMolFile(
                     str(Path(args.warheads_sdf).expanduser() / f"{r.warhead_id}.sdf"))
                 posed = Chem.MolFromMolFile(str(head_b))
-                if tmpl is not None and posed is not None:
-                    fix = AllChem.AssignBondOrdersFromTemplate(tmpl, posed)
-                    with Chem.SDWriter(str(corrigido)) as w:
-                        w.write(fix)
+                if (tmpl is not None and posed is not None
+                        and tmpl.GetNumAtoms() == posed.GetNumAtoms()
+                        and [a.GetSymbol() for a in tmpl.GetAtoms()]
+                            == [a.GetSymbol() for a in posed.GetAtoms()]):
+                    alvo = Chem.Mol(tmpl)
+                    conf = Chem.Conformer(alvo.GetNumAtoms())
+                    pc = posed.GetConformer()
+                    for i in range(alvo.GetNumAtoms()):
+                        conf.SetAtomPosition(i, pc.GetAtomPosition(i))
+                    alvo.RemoveAllConformers()
+                    alvo.AddConformer(conf, assignId=True)
+                    Chem.SanitizeMol(alvo)
+                    if not any(a.GetNumRadicalElectrons() for a in alvo.GetAtoms()):
+                        with Chem.SDWriter(str(corrigido)) as w:
+                            w.write(alvo)
+                else:
+                    print(f"  [Head não conferido] {r.warhead_id}: pose e SDF "
+                          f"do gerador não correspondem átomo a átomo")
             except Exception as exc:
-                print(f"  [ordens não corrigidas] {r.warhead_id}: {exc}")
+                print(f"  [Head não conferido] {r.warhead_id}: {exc}")
         if corrigido.exists():
             head_b = corrigido
         d = root / r.candidate_id

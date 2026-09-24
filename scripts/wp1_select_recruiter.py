@@ -183,21 +183,60 @@ def melhor_por_score(arquivos: list[Path]) -> Path:
 
 
 def corrigir_ordens(pose, ref):
-    """Devolve a pose com as ordens de ligação do SDF preparado.
+    """Devolve a molécula com a química do SDF preparado e as coordenadas
+    do docking.
 
-    O PDBQT não guarda ordem de ligação. Na volta para SDF uma amida vira
-    amina com hidrogênio a mais, e o nitrogênio estoura a valência assim que
-    recebe o linker — foi o que derrubou metade das montagens do WP3.
-    AssignBondOrdersFromTemplate transfere as ordens corretas preservando as
-    coordenadas do docking.
+    O PDBQT não guarda ordem de ligação nem hidrogênio. A pose lida de volta
+    tem os átomos com valência travada, e daí saem dois estragos encadeados:
+    um nitrogênio de amida vira amina e estoura a valência ao receber o linker
+    (as 75 falhas de montagem do WP3), e os carbonos ficam sem hidrogênio
+    nenhum — radicais, que o antechamber rejeita com "the number of electrons
+    is odd".
+
+    Consertar a pose não funciona: AssignBondOrdersFromTemplate sozinho deixa
+    33 elétrons radicalares, e liberar o hidrogênio implícito depois disso
+    destrói a aromaticidade. Então o caminho é o inverso: parte-se da
+    molécula PREPARADA, que tem a química certa, e transplantam-se as
+    coordenadas da pose para ela.
     """
     if ref is None:
-        return pose, "sem referência (ordens de ligação NÃO conferidas)"
+        return pose, "sem referência (química NÃO conferida)"
     try:
-        from rdkit.Chem import AllChem
-        return AllChem.AssignBondOrdersFromTemplate(ref, pose), "corrigidas"
+        alvo = Chem.Mol(ref)
+        if alvo.GetNumAtoms() != pose.GetNumAtoms():
+            return pose, (f"contagem de átomos difere (preparada "
+                          f"{alvo.GetNumAtoms()}, pose {pose.GetNumAtoms()})")
+
+        # 1) casamento exato, quando a pose preservou a química
+        match = alvo.GetSubstructMatch(pose)
+
+        # 2) identidade: pose e preparada são a MESMA molécula, e a conversão
+        #    sdf -> pdbqt -> sdf preserva a ordem dos átomos pesados. Só é
+        #    aceita depois de conferir elemento por elemento — se um único
+        #    átomo discordar, a correspondência está errada e não se usa.
+        if not match:
+            elems_alvo = [a.GetSymbol() for a in alvo.GetAtoms()]
+            elems_pose = [a.GetSymbol() for a in pose.GetAtoms()]
+            if elems_alvo == elems_pose:
+                match = tuple(range(alvo.GetNumAtoms()))
+
+        if not match or len(match) != pose.GetNumAtoms():
+            return pose, "estruturas não casaram (química NÃO conferida)"
+
+        pconf = pose.GetConformer()
+        novo_conf = Chem.Conformer(alvo.GetNumAtoms())
+        for i_pose, i_alvo in enumerate(match):
+            novo_conf.SetAtomPosition(i_alvo, pconf.GetAtomPosition(i_pose))
+        alvo.RemoveAllConformers()
+        alvo.AddConformer(novo_conf, assignId=True)
+        Chem.SanitizeMol(alvo)
+
+        rad = sum(a.GetNumRadicalElectrons() for a in alvo.GetAtoms())
+        if rad:
+            return pose, f"transplante deixou {rad} radicais — descartado"
+        return alvo, "coordenadas transplantadas para a molécula preparada"
     except Exception as exc:
-        return pose, f"falha ao corrigir ({type(exc).__name__})"
+        return pose, f"falha ({type(exc).__name__}: {exc})"
 
 
 def carregar_mol(caminho: Path, tmp: Path):
@@ -468,6 +507,13 @@ def main():
 
             if e3 in resultados:
                 continue                       # guarda só o melhor por E3
+
+            rad = sum(a.GetNumRadicalElectrons() for a in mol.GetAtoms())
+            if rad:
+                print(f"      [DESCARTADO] {rad} elétrons radicalares: a "
+                      f"química desta pose não pôde ser reconstruída, e ela "
+                      f"quebraria o antechamber lá na MD")
+                continue
 
             sdf = out.parent / f"recruiter_{e3}_{lig_id}.sdf"
             with Chem.SDWriter(str(sdf)) as w:
