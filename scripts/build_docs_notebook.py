@@ -2,8 +2,8 @@
 """
 Monta notebooks/protac_pipeline_documentado.ipynb — o registro do pipeline.
 
-Este notebook não *executa* o pipeline: ele conta o que cada fase faz, por que
-faz assim, o que já se sabe dos resultados, e traz células que **leem** as
+Este notebook não *executa* o pipeline: ele explica o que cada fase faz, por
+que faz assim, o que os resultados mostraram, e traz células que **leem** as
 saídas do disco. Nenhuma célula escreve, roda docking ou toca na MD, então é
 seguro abrir e executar enquanto a simulação roda na mesma máquina.
 
@@ -31,74 +31,141 @@ def code(src: str):
 
 
 # ===========================================================================
-# Capa
+# CAPA
 # ===========================================================================
 md(r"""
-# PROTAC PCSK9 — registro do pipeline, fase por fase
+# PROTAC contra a PCSK9 — registro completo do pipeline
 
-Este notebook é o **caderno de laboratório computacional** do projeto: o que
-foi feito em cada fase, por quê, com que código, o que os resultados mostraram,
-e onde o caminho teve de ser corrigido.
+**Caderno de laboratório computacional.** Oito fases, do esqueleto químico da
+warhead até a dinâmica molecular que testa se a molécula aguenta. Cada seção
+diz o que a fase faz, por que faz assim, o que entra, o que sai, e o que os
+resultados mostraram.
 
-> **Nenhuma célula aqui escreve arquivos, roda docking ou mexe na MD.**
-> Todas só leem as saídas que já estão no disco. É seguro executar este
-> notebook com a simulação rodando na mesma máquina.
+> **Nenhuma célula deste caderno escreve arquivos, roda docking ou mexe na MD.**
+> Todas só leem o que já está no disco. É seguro abrir e executar com a
+> simulação rodando na mesma máquina.
 
-## O alvo e a ideia
+---
 
-A PCSK9 se liga ao receptor de LDL (LDLR) e o manda para degradação lisossomal;
-menos LDLR na superfície do hepatócito significa mais LDL circulante. Os
-anticorpos aprovados (evolocumabe, alirocumabe) bloqueiam essa interação, mas
-são injetáveis e caros. Um **PROTAC** ataca por outra via: em vez de bloquear a
-PCSK9, recruta uma ligase E3 para ubiquitiná-la e destruí-la.
+## 1. O problema
 
-Um PROTAC tem três partes:
+A **PCSK9** é uma protease que se liga ao receptor de LDL (LDLR) na superfície
+do hepatócito e o arrasta para degradação lisossomal. Menos LDLR na superfície
+significa menos captação de LDL, e portanto mais colesterol LDL circulante.
+Mutações que aumentam a atividade da PCSK9 causam hipercolesterolemia familiar;
+mutações que a inativam dão LDL baixo por toda a vida, sem prejuízo aparente —
+o que faz dela um alvo com validação genética humana, não apenas farmacológica.
+
+Os fármacos aprovados são **anticorpos monoclonais** (evolocumabe,
+alirocumabe): eficazes, mas injetáveis, caros, e limitados a bloquear a PCSK9
+**extracelular**. Um inibidor de pequena molécula tradicional enfrenta um
+problema de superfície: a interface PCSK9–LDLR é plana e extensa, o tipo de
+sítio que não acomoda bem uma molécula pequena.
+
+## 2. A ideia do PROTAC
+
+Um **PROTAC** (*PROteolysis TArgeting Chimera*) não bloqueia — **destrói**. É
+uma molécula com três partes:
 
 ```
-   [ recrutador E3 ] — [ linker ] — [ warhead ]
-     VHL ou CRBN                     liga na PCSK9
+      [ recrutador E3 ] ─── [ linker ] ─── [ warhead ]
+        liga na ligase           ponte       liga na PCSK9
+        (VHL ou CRBN)
 ```
 
-A molécula é uma ponte: ela precisa segurar as duas proteínas ao mesmo tempo,
-na geometria certa, por tempo suficiente para a transferência de ubiquitina. É
+Ela aproxima a proteína-alvo de uma **ligase E3 de ubiquitina**. A E3
+ubiquitina a PCSK9, o proteassomo a degrada, e o PROTAC se solta para repetir o
+ciclo. Três consequências mudam o jogo:
+
+1. **Não precisa de sítio ativo.** Basta um ponto de apoio qualquer na
+   superfície, porque a warhead não tem de inibir nada — só segurar.
+2. **É catalítico.** Uma molécula degrada muitas cópias da proteína, então a
+   ocupação necessária é muito menor que a de um inibidor competitivo.
+3. **O efeito é a ausência da proteína**, não a redução de sua atividade.
+
+O preço é geométrico e é o centro deste trabalho: o PROTAC precisa segurar
+**as duas proteínas ao mesmo tempo**, na orientação certa, por tempo
+suficiente para a transferência de ubiquitina. Uma molécula que liga bem nas
+duas pontas e não consegue formar o complexo ternário produtivo é inútil. É
 por isso que o pipeline não termina no docking — termina numa MD que pergunta
 se a ponte **aguenta**.
 
-## O mapa das fases
+## 3. Como o pipeline responde a isso
 
-| Fase | O que faz | Custo típico | Script |
+| Fase | Pergunta que responde | Custo | Script |
 |---|---|---|---|
-| 1 | enumera as warheads fenetilamina | segundos | `generate_pcsk9_warheads.py` |
-| 2 | sítio na PCSK9, portão de validação, triagem por docking | horas (GPU) | `prep_pcsk9_receptor.py`, `dock_warheads_pcsk9.py` |
-| 3 | análise da triagem e escolha das warheads | segundos | `analyze_warhead_docking.py` |
-| 4 | WP1: revalida o redocking e escolhe o recrutador E3 | minutos | `wp1_select_recruiter.py` |
-| 5 | WP2: linkers do Chemspace, geometria no exit vector | ~1 h | `wp2_linker_tools.py`, `wp2_build_subcomplexes.py` |
-| 6 | WP3: monta os PROTACs completos | minutos | `wp3_assemble_protacs.py` |
-| 7 | ranqueia os PROTACs e escolhe o candidato da MD | segundos | `rank_protacs.py` |
-| 8 | MD do nível (ii): E3 + recrutador-linker-warhead | dias (GPU) | `md_prepare.py`, `md_run.sh`, `md_analyze.py` |
+| **1** | Que warheads existem no espaço químico proposto? | segundos | `generate_pcsk9_warheads.py` |
+| **2** | Alguma delas liga na PCSK9 — e o protocolo sabe medir isso? | horas (GPU) | `prep_pcsk9_receptor.py`, `dock_warheads_pcsk9.py` |
+| **3** | Quais ligam **e** têm o ponto de conjugação exposto? | segundos | `analyze_warhead_docking.py` |
+| **4** | Qual E3 usar, e por onde o linker sai do recrutador? | minutos | `wp1_select_recruiter.py` |
+| **5** | Que linkers do catálogo alcançam a warhead a partir dali? | ~1 h | `wp2_linker_tools.py`, `wp2_build_subcomplexes.py` |
+| **6** | As moléculas completas se montam corretamente? | minutos | `wp3_assemble_protacs.py` |
+| **7** | Qual candidato merece os dias de GPU da MD? | segundos | `rank_protacs.py` |
+| **8** | O complexo aguenta 200 ns? | dias (GPU) | `md_prepare.py`, `md_run.sh`, `md_analyze.py` |
 
-Tudo isso é encadeado por `scripts/run_pipeline.sh`, que grava um marcador
-`.done_<n>` por fase concluída — relançar depois de uma queda custa só a fase
-interrompida.
+O fluxo de dados, de ponta a ponta:
 
-## Duas ideias que valem para todo o pipeline
+```
+  esqueleto fenetilamina
+        │  R1 × R2 × R3
+        ▼
+  [1] 180 warheads (.sdf)
+        │  docking na PCSK9 (6U26)
+        ▼
+  [2] scores + poses           ──┐
+        │                        │ portão: redocking do 063 ≤ 2,0 Å
+  [3] warheads viáveis  ◄────────┘
+        │  (liga E tem o N exposto)
+        │
+        │      cristal da E3 (4TZ4)
+        │            │
+        │      [4] recrutador + exit vector  ◄── portão: redocking
+        │            │
+        │      [5] linkers do Chemspace com geometria compatível
+        │            │
+        └──────► [6] PROTACs completos
+                     │  escore composto
+                     ▼
+                [7] fila de candidatos ──► [8] MD do melhor ──► veredito
+                                                  │                 │
+                                             reprovou? ─────────────┘
+                                             MD_RANK=2, sem recalcular nada
+```
 
-**1. Portões, não filtros.** Em três pontos o pipeline *para* se um critério
-não é atingido, em vez de seguir com números ruins: o redocking do WP1, a
-validação do protocolo na PCSK9 e o veredito da MD. Um filtro descarta
-moléculas; um portão descarta o **método**.
+## 4. Duas ideias que valem para todo o pipeline
 
-**2. Falha silenciosa é o inimigo.** Vários erros encontrados aqui não
-levantavam exceção — devolviam um número plausível e errado. Um RMSD de 0,00 Å
-para uma pose a 25 Å do lugar. Um lote inteiro de PROTACs montado sem warhead.
-Por isso quase todo script verifica a própria saída antes de devolvê-la, e o
-apêndice deste notebook lista cada caso.
+**Portões, não filtros.** Em três pontos o pipeline **para** se um critério não
+é atingido, em vez de seguir com números ruins: o redocking do WP1, a validação
+do protocolo na PCSK9, e o veredito da MD. Um filtro descarta moléculas; um
+portão descarta o **método**. Se o protocolo não reproduz a pose
+cristalográfica que ele deveria reproduzir, nenhum resultado dele significa
+nada, e é melhor descobrir isso antes de gastar dias de GPU.
+
+**Falha silenciosa é o inimigo.** Vários erros encontrados aqui não levantavam
+exceção — devolviam um número plausível e errado. Um RMSD de 0,00 Å para uma
+pose a 25 Å do lugar. Um lote inteiro de PROTACs montado sem warhead nenhuma.
+Um índice de acoplamento procurando um grupo que nunca poderia existir. Por
+isso quase todo script deste repositório **verifica a própria saída** antes de
+devolvê-la, e o Apêndice A cataloga cada caso com o sintoma, a causa e a
+correção.
+""")
+
+md(r"""
+---
+## Como usar este caderno
+
+Execute a célula abaixo primeiro: ela aponta para as saídas no disco e mostra o
+que já existe. Todas as outras células são independentes — rode a da fase que
+quiser inspecionar.
+
+Os caminhos vêm de `config/pipeline.conf`, que é o único lugar onde mora
+qualquer coisa que muda de máquina ou de projeto.
 """)
 
 code(r"""
-# Configuração: aponta para as saídas no disco. Só leitura.
+# Configuração e inventário. Só leitura.
 from pathlib import Path
-import json, os
+import json
 import pandas as pd
 
 HOME = Path.home()
@@ -108,72 +175,95 @@ WARHEADS = HOME / "PCSK9_warheads"
 DOCKING = HOME / "PCSK9_docking"
 MD = OUT / "md"
 
-pd.set_option("display.width", 160, "display.max_columns", 40)
+pd.set_option("display.width", 170, "display.max_columns", 40)
 
-def existe(p):
-    p = Path(p)
-    return f"{'OK ' if p.exists() else '-- '} {p}"
+ESPERADOS = [
+    ("1", WARHEADS / "pcsk9_warheads.csv",      "warheads enumeradas"),
+    ("2", DOCKING / "validation.json",          "portão do protocolo"),
+    ("2", DOCKING / "round2_scores.csv",         "scores da rodada 2"),
+    ("3", DOCKING / "warhead_ranking.csv",       "análise e viabilidade"),
+    ("4", OUT / "wp1_recruiter.json",            "recrutador E3 escolhido"),
+    ("5", OUT / "linker_ranking.csv",            "linkers avaliados"),
+    ("5", OUT / "subcomplexes_manifest.json",    "sub-complexos montados"),
+    ("6", OUT / "protac_candidates.csv",         "PROTACs completos"),
+    ("7", OUT / "protac_ranking.csv",            "fila da MD"),
+    ("7", OUT / "md_candidato.json",             "candidato escolhido"),
+    ("8", MD / "md_sistema.json",                "sistema montado"),
+    ("8", MD / "md_resultados.csv",              "métricas por réplica"),
+    ("8", MD / "md_veredito.json",               "veredito final"),
+]
 
-for p in [WARHEADS / "pcsk9_warheads.csv",
-          DOCKING / "validation.json",
-          DOCKING / "round2_scores.csv",
-          DOCKING / "warhead_ranking.csv",
-          OUT / "wp1_recruiter.json",
-          OUT / "linker_ranking.csv",
-          OUT / "protac_candidates.csv",
-          OUT / "protac_ranking.csv",
-          OUT / "md_candidato.json",
-          MD / "md_sistema.json",
-          MD / "md_resultados.csv",
-          MD / "md_veredito.json"]:
-    print(existe(p))
+print(f"{'fase':>4}  {'':3}  arquivo")
+print("-" * 78)
+for fase, p, desc in ESPERADOS:
+    marca = "OK " if p.exists() else "-- "
+    print(f"{fase:>4}  {marca}  {desc:<28s} {p.name}")
+print("-" * 78)
+print("OK = existe no disco   -- = fase não rodada ou ainda em andamento")
 """)
 
 # ===========================================================================
+# FASE 1
+# ===========================================================================
 md(r"""
 ---
-# Fase 1 — as warheads
+# Fase 1 — Enumerar as warheads
 
-**Script:** `scripts/generate_pcsk9_warheads.py` · **saída:**
-`~/PCSK9_warheads/pcsk9_warheads.csv` + um `.sdf` por warhead
+**Script:** `scripts/generate_pcsk9_warheads.py` · **env:** `mdtools` ·
+**custo:** segundos
+**Saída:** `~/PCSK9_warheads/pcsk9_warheads.csv` + um `.sdf` por warhead
 
-## O que foi feito
+## O que esta fase faz
 
-O ponto de partida é o esqueleto **fenetilamina** dos inibidores de PCSK9 da
-literatura, com três posições variáveis:
+Transforma uma proposta de química em um conjunto concreto de moléculas 3D
+prontas para docking. O ponto de partida é o esqueleto **fenetilamina** dos
+inibidores de PCSK9 descritos na literatura, com três posições variáveis:
 
-| Posição | Variações |
-|---|---|
-| **R1** | `-OAr` (fenoxi e análogos), ciclopropil, ciclobutil |
-| **R2** | `-CF3`, naftaleno, F, Cl, OH |
-| **R3** | metilsulfonil (`-Ms`), tetrazol (`-Tet`), H |
+| Posição | Variações exploradas | Papel estrutural |
+|---|---|---|
+| **R1** | `-OAr` (fenoxi e análogos), ciclopropil, ciclobutil | preenche o bolso hidrofóbico |
+| **R2** | `-CF3`, naftaleno, F, Cl, OH | modula eletrônica e volume |
+| **R3** | metilsulfonil (`-Ms`), tetrazol (`-Tet`), H | grupo polar de ancoragem |
 
-O produto cartesiano dessas listas, depois de remover duplicatas por SMILES
+O produto cartesiano dessas listas, após remover duplicatas por SMILES
 canônico, dá **180 warheads únicas**. Cada uma sai como `.sdf` com confôrmeros
-gerados por ETKDGv3 e minimizados em MMFF94s.
+gerados por **ETKDGv3** e minimizados em **MMFF94s**.
 
-## Duas decisões de implementação que importam
+## Por que assim
 
 **A montagem é por `Chem.molzip`, não por concatenação de texto.** A primeira
-versão montava as moléculas colando pedaços de SMILES. Isso funcionou para os
-primeiros casos e quebrou nos anéis: os dígitos de fechamento de anel (`c1ccc1`)
-de dois fragmentos diferentes colidem quando as strings são emendadas, e o
-resultado é uma molécula com a conectividade errada — que o RDKit aceita sem
-reclamar. Com `molzip` e mapas de átomos (`[*:1]`), a ligação é feita no grafo,
-não no texto, e não existe colisão possível.
+versão colava pedaços de SMILES. Funcionou nos casos simples e quebrou nos
+anéis: os dígitos de fechamento de anel (`c1ccc1`) de dois fragmentos
+diferentes **colidem** quando as strings são emendadas, e o resultado é uma
+molécula com conectividade errada — que o RDKit aceita sem reclamar. Com
+`molzip` e mapas de átomos (`[*:1]`), a ligação é feita no grafo, não no texto,
+e não existe colisão possível.
 
 **O átomo 0 de cada warhead é o nitrogênio de conjugação.** A função
 `reorder_attachment_first` renumera os átomos para que o N que vai receber o
-linker seja sempre o índice 0. Isso é o que permite, lá na fase 6, montar o
-PROTAC sem procurar o ponto de ligação por SMARTS em cada molécula.
+linker seja sempre o índice 0. Isso é o que permite, na fase 6, montar o PROTAC
+sem ter de procurar o ponto de ligação por SMARTS em cada molécula — o ponto é
+conhecido por construção.
+
+## Como rodar
+
+```bash
+python scripts/generate_pcsk9_warheads.py --outdir ~/PCSK9_warheads --nconfs 50
+```
+
+## O que conferir
+
+- **180 warheads** no CSV (menos que 8 × 6 × 4 = 192, porque duplicatas saem)
+- a distribuição de R1/R2/R3 deve ser aproximadamente uniforme
+- cada `.sdf` tem confôrmeros, não uma estrutura só
 """)
 
 code(r"""
-# As warheads enumeradas, com os grupos R decodificados
+# Fase 1 — as warheads enumeradas, com os grupos R decodificados
 p = WARHEADS / "pcsk9_warheads.csv"
 if p.exists():
     w = pd.read_csv(p)
-    print(f"{len(w)} warheads\n")
+    print(f"{len(w)} warheads únicas\n")
     print(w.head(8).to_string(index=False))
     for col in ("R1", "R2", "R3"):
         if col in w:
@@ -184,67 +274,80 @@ else:
 """)
 
 # ===========================================================================
+# FASE 2
+# ===========================================================================
 md(r"""
 ---
-# Fase 2 — o sítio na PCSK9, o portão de validação, e a triagem
+# Fase 2 — O sítio na PCSK9, o portão de validação, e a triagem
 
 **Scripts:** `prep_pcsk9_receptor.py`, `docking_engines.py`,
-`dock_warheads_pcsk9.py` · **saída:** `~/PCSK9_docking/`
+`dock_warheads_pcsk9.py` · **envs:** `mdtools` → `pf_vs` · **custo:** horas (GPU)
+**Saída:** `~/PCSK9_docking/` — `validation.json`, `round1_scores.csv`,
+`round2_scores.csv`, `heads_manifest.json`
 
-## 2a. O sítio
+## O que esta fase faz
+
+Três coisas, em ordem obrigatória: define **onde** docar, prova que o protocolo
+**sabe** docar ali, e só então docar as 180 warheads.
+
+### 2a. O sítio
 
 O receptor vem do co-cristal **6U26**, que traz o ligante de referência `063`
-num bolso da PCSK9. O sítio de docking é definido pelo **núcleo enterrado**
-desse ligante (`--site-mode ligand`, corte de enterramento em 20):
+num bolso da PCSK9. O sítio é definido pelo **núcleo enterrado** desse ligante
+(`--site-mode ligand`, corte de enterramento 20):
 
 ```
-centro   = [38.589, 25.818, 26.443]
-caixa    = [20.47, 18.46, 18.16] Å
-exit vec = [0.222, 0.8162, 0.5333]
+centro       = [38.589, 25.818, 26.443]
+caixa        = [20.47, 18.46, 18.16] Å
+exit vector  = [0.222, 0.8162, 0.5333]
 ```
 
-O *exit vector* é a direção em que o solvente está acessível a partir do sítio.
-É por ali que o linker tem de sair para alcançar a E3 — e é o critério
-geométrico central da fase 5.
+O **exit vector** é a direção em que o solvente está acessível a partir do
+sítio. É por ali que o linker tem de sair para alcançar a E3, e é o critério
+geométrico central da fase 5. Sem ele, o docking mede afinidade e ignora a
+única coisa que importa para um PROTAC: se há saída.
 
-> **Uma correção importante para a tese:** eu havia dito antes que este sítio
-> ficava na interface com o LDLR. Não fica. Medindo, ele está a **23,4 Å da
-> interface EGF(A) do LDLR**. A warhead aqui, portanto, **não** é um
-> antagonista competitivo da ligação ao LDLR — ela é um *ponto de apoio* para
-> a degradação. Isso é uma vantagem conceitual do PROTAC (não precisa bloquear
-> nada, só segurar), mas precisa estar escrito assim, não como bloqueio.
+> ### Uma correção importante para a tese
+> Eu havia afirmado antes que este sítio ficava na interface com o LDLR.
+> **Não fica.** Medido, ele está a **23,4 Å da interface EGF(A) do LDLR**.
+> A warhead aqui, portanto, **não** é um antagonista competitivo da ligação
+> ao LDLR — ela é um **ponto de apoio** para a degradação. Isso é uma
+> vantagem conceitual do PROTAC (não precisa bloquear nada, só segurar), mas
+> precisa estar escrito assim, e não como bloqueio.
 
-## 2b. O portão: o protocolo sabe reproduzir o cristal?
+### 2b. O portão: o protocolo sabe reproduzir o cristal?
 
 Antes de docar 180 moléculas novas, o protocolo tem de reencontrar a pose
-cristalográfica do próprio `063`. Critério: **RMSD ≤ 2,0 Å** em 5 sementes
-diferentes.
+cristalográfica do próprio `063`. Critério: **RMSD ≤ 2,0 Å** em 5 sementes.
 
 A primeira tentativa deu **9,92 Å** e levou ~25 min por semente. O diagnóstico:
 o script redocava o ligante **inteiro** (76 átomos) numa caixa desenhada para o
 **núcleo enterrado**. 19 dos 76 átomos ficavam fora da caixa — a pose
-cristalográfica era literalmente inalcançável, e o docking estava sendo
+cristalográfica era literalmente inalcançável, e o protocolo estava sendo
 reprovado por uma pergunta impossível. Redocando o núcleo truncado, que é o que
 a caixa comporta:
 
 ```
-RMSD = 0.21 Å  (5/5 sementes)
+RMSD = 0,21 Å  (5/5 sementes)
 ```
 
-O portão passa, e agora ele mede o que se propôs a medir.
+O portão passa, e agora ele mede o que se propôs a medir. A lição é geral:
+**um portão que reprova pode estar errado sobre o que pergunta**, e vale checar
+a pergunta antes de afrouxar o critério.
 
-## 2c. A triagem, em duas rodadas, na GPU
+### 2c. A triagem, em duas rodadas, na GPU
 
 O motor é o **Uni-Dock** (já instalado no env `pf_vs` — descobri isso tarde,
 depois de tentar clonar envs sem permissão de escrita). Ele docka em lote na
-GPU via `--gpu_batch`, o que muda a escala do problema: o que o Vina faria em
-dias sai em horas.
+GPU via `--gpu_batch`, o que muda a escala: o que o Vina faria em dias sai em
+horas. `docking_engines.py` mantém Vina e Uni-Dock atrás da **mesma
+assinatura**, então trocar de motor é um argumento, não uma reescrita.
 
-- **Rodada 1**, exaustividade baixa, todas as 180 warheads. Sobrevive quem
-  pontua abaixo de `-7.0` kcal/mol.
-- **Rodada 2**, exaustividade alta, 5 sementes, só nos sobreviventes.
+- **Rodada 1**: exaustividade baixa, todas as 180. Sobrevive quem pontua abaixo
+  de `-7.0` kcal/mol.
+- **Rodada 2**: exaustividade alta, **5 sementes**, só nos sobreviventes.
 
-Duas coisas foram ajustadas aqui por experiência, não por teoria:
+Duas coisas ajustadas por experiência, não por teoria:
 
 1. **A semente é o laço externo**, não interno (`runs_by_seed`). Assim cada
    semente é *um* lote na GPU, em vez de um lote por ligante. É a diferença
@@ -252,48 +355,83 @@ Duas coisas foram ajustadas aqui por experiência, não por teoria:
 2. **Progresso a cada semente, com `flush=True`**, e `python -u` no driver. Sem
    isso o buffer de blocos do Python segura a saída, `tail -f` mostra um arquivo
    parado, e a pessoa conclui que o job travou quando ele está rodando.
+
+## Como rodar
+
+```bash
+# no env mdtools — receptor e sítio
+python scripts/prep_pcsk9_receptor.py --pdb ~/structures/6U26.pdb \
+    --chain B --keep-chains "A B" --ref-ligand 063 --site-mode ligand
+
+# no env pf_vs — portão e triagem
+python -u scripts/dock_warheads_pcsk9.py --engine unidock --validate-protocol
+python -u scripts/dock_warheads_pcsk9.py --engine unidock --series all
+```
+
+## O que conferir
+
+- `validation.json` com RMSD ≤ 2,0 Å nas 5 sementes — **se falhar, pare aqui**
+- quantas warheads passaram a rodada 1 (se passarem quase todas, o corte está
+  frouxo; se passar quase nenhuma, reveja o sítio antes de afrouxar)
+- desvio entre sementes na rodada 2: pose que muda de lugar não é pose
 """)
 
 code(r"""
-# O portão de validação e o resultado da triagem
+# Fase 2 — o portão e o resultado da triagem
 p = DOCKING / "validation.json"
 if p.exists():
     v = json.loads(p.read_text())
     print("PORTÃO DE VALIDAÇÃO DO PROTOCOLO")
     for k, val in v.items():
         print(f"  {k}: {val}")
+    passou = v.get("passou", v.get("ok"))
+    if passou is not None:
+        print(f"\n  -> {'PASSOU' if passou else 'REPROVOU — nada depois disto vale'}")
 else:
     print("validation.json ausente")
 
-p = DOCKING / "round2_scores.csv"
-if p.exists():
-    r2 = pd.read_csv(p)
-    print(f"\nRodada 2: {len(r2)} warheads")
-    print(r2.sort_values("best_score").head(10).to_string(index=False))
+for nome, rotulo in (("round1_scores.csv", "Rodada 1 (triagem grossa)"),
+                     ("round2_scores.csv", "Rodada 2 (5 sementes)")):
+    p = DOCKING / nome
+    if p.exists():
+        r = pd.read_csv(p)
+        print(f"\n{rotulo}: {len(r)} warheads")
+        if "best_score" in r:
+            print(f"  melhor {r['best_score'].min():.2f} | "
+                  f"mediana {r['best_score'].median():.2f} | "
+                  f"pior {r['best_score'].max():.2f} kcal/mol")
+            print(r.nsmallest(8, "best_score").to_string(index=False))
 """)
 
 # ===========================================================================
+# FASE 3
+# ===========================================================================
 md(r"""
 ---
-# Fase 3 — a análise que mudou a estratégia
+# Fase 3 — A análise que mudou a estratégia
 
-**Script:** `scripts/analyze_warhead_docking.py` · **saída:**
-`warhead_ranking.csv`
+**Script:** `scripts/analyze_warhead_docking.py` · **env:** `mdtools` ·
+**custo:** segundos
+**Saída:** `warhead_ranking.csv`
 
-Esta fase é a mais importante do pipeline inteiro, e não porque calcula algo
-difícil: porque ela **desmonta a leitura ingênua do docking**. Quatro achados:
+## O que esta fase faz
 
-## 1. O score bruto é uma medida de massa (r = −0,92)
+Esta é a fase mais importante do pipeline, e não porque calcula algo difícil:
+porque ela **desmonta a leitura ingênua do docking**. Ela responde "quais
+warheads seguem para virar PROTAC" com quatro critérios, e três deles não têm
+nada a ver com afinidade.
+
+## Achado 1 — o score bruto é uma medida de massa (r = −0,92)
 
 A correlação entre score de docking e número de átomos pesados é **−0,92**.
-Isto é, 85% da variação do score se explica só pelo tamanho da molécula.
+Isto é, ~85% da variação do score se explica só pelo tamanho da molécula.
 Ranquear por score bruto é ranquear por peso molecular com passos extras.
 
-O contorno é a **eficiência de ligação** (*ligand efficiency*):
+O contorno padrão é a **eficiência de ligação**:
 
 $$\mathrm{LE} = \frac{-\,\mathrm{score}}{N_{\text{átomos pesados}}}$$
 
-E as duas listas não se parecem:
+E as duas listas quase não se tocam:
 
 | | top-20 por score | top-20 por LE |
 |---|---|---|
@@ -301,65 +439,86 @@ E as duas listas não se parecem:
 
 O naftil domina o ranking por score porque é grande, não porque encaixa bem. Se
 o critério fosse o score bruto, o pipeline inteiro teria seguido com naftalenos
-por um artefato de normalização.
+**por um artefato de normalização** — e essa é exatamente a série que o
+`docs/RUNBOOK.md` marca como risco de interação espúria com a E3.
 
-## 2. R3 = H é inviável — 0%
+## Achado 2 — R3 = H é inviável: 0%
 
-Isto contradiz o que **eu mesmo havia recomendado** ("comece pela Série A").
-O teste é geométrico: a warhead só serve se o **nitrogênio de conjugação ficar
-exposto ao solvente** na pose docada, porque é ali que o linker se liga. Se o N
-fica enterrado, a warhead pode ter score ótimo e ser inútil.
+Isto **contradiz uma recomendação que eu mesmo havia dado** ("comece pela Série
+A"). O teste é geométrico, não energético: a warhead só serve se o **nitrogênio
+de conjugação ficar exposto ao solvente** na pose docada, porque é ali que o
+linker se liga. N enterrado = warhead com score ótimo e utilidade zero.
 
-| R3 | fração com o N exposto |
+| R3 | fração viável |
 |---|---|
 | metilsulfonil (`-Ms`) | **48%** |
 | tetrazol (`-Tet`) | intermediária |
-| H | **0%** (só 14% têm o N acessível, nenhuma passa o conjunto de critérios) |
+| **H** | **0%** — só 14% têm o N acessível, e nenhuma passa o conjunto de critérios |
 
 A explicação é simples depois de vista: sem o grupo volumoso em R3, a molécula
-acomoda-se mais fundo no bolso e enterra justamente a amina.
+acomoda-se mais fundo no bolso e enterra justamente a amina que precisa ficar
+livre.
 
-## 3. R2 = CF3 não aparece em nenhuma das duas listas
+## Achado 3 — R2 = CF3 não aparece em nenhuma das duas listas
 
-Nem por score, nem por LE. É uma ausência informativa: vale registrar na tese
-como variação testada e descartada por evidência, não por omissão.
+Nem por score, nem por LE. É uma **ausência informativa**: vale registrar na
+tese como variação testada e descartada por evidência, não por omissão.
 
-## 4. Estabilidade de pose entre sementes
+## Achado 4 — estabilidade de pose entre sementes
 
 Uma warhead cuja pose muda de lugar entre as 5 sementes não tem um modo de
-ligação — tem ruído. O desvio entre sementes entra como critério
+ligação: tem ruído. O desvio entre sementes entra como critério
 (`ANALISE_SD_MAX=0.5`) junto ao alinhamento com o exit vector
 (`ANALISE_COS_MIN=0.3`).
 
-> **Honestidade sobre o corte:** `COS_MIN=0.3` foi escolhido sem base empírica;
-> ele dá 30 warheads de 146. Afrouxar para 0.2 aumenta o conjunto. A escolha
-> precisa aparecer na tese **como escolha**, não como constante natural.
+> **Honestidade sobre os cortes.** `COS_MIN=0.3` foi escolhido **sem base
+> empírica**; ele dá 30 warheads de 146. Afrouxar para 0.2 aumenta o conjunto.
+> Isso precisa aparecer na tese **como escolha**, com o efeito de afrouxá-la
+> registrado — não como constante natural.
+
+## Como rodar
+
+```bash
+python scripts/analyze_warhead_docking.py --docking ~/PCSK9_docking
+```
+
+## O que conferir
+
+- a correlação score × átomos pesados (se não for fortemente negativa, algo
+  está diferente do esperado e o raciocínio acima precisa ser revisto)
+- a sobreposição entre os dois top-20
+- as taxas de viabilidade por R3
 """)
 
 code(r"""
-# Os quatro achados, reproduzidos a partir do ranking gravado
+# Fase 3 — os quatro achados, reproduzidos a partir do ranking gravado
 p = DOCKING / "warhead_ranking.csv"
 if p.exists():
     r = pd.read_csv(p)
     print(f"{len(r)} warheads analisadas\n")
 
     if {"best_score", "heavy_atoms"} <= set(r.columns):
-        print(f"1) correlação score x átomos pesados: "
-              f"{r['best_score'].corr(r['heavy_atoms']):.3f}")
+        rho = r["best_score"].corr(r["heavy_atoms"])
+        print(f"1) correlação score x átomos pesados: {rho:.3f}"
+              f"   (r² = {rho**2:.2f} da variação é só tamanho)")
 
     if {"best_score", "ligand_efficiency"} <= set(r.columns):
         top_s = set(r.nsmallest(20, "best_score").index)
         top_le = set(r.nlargest(20, "ligand_efficiency").index)
-        print(f"2) top-20 por score e por LE compartilham "
-              f"{len(top_s & top_le)} moléculas de 20")
+        print(f"2) os dois top-20 compartilham {len(top_s & top_le)} de 20 moléculas")
+        if "R2" in r:
+            for rot, grupo in (("por score", top_s), ("por LE", top_le)):
+                sub = r.loc[sorted(grupo), "R2"].value_counts(normalize=True) * 100
+                print(f"   R2 no top-20 {rot}: "
+                      + ", ".join(f"{k} {v:.0f}%" for k, v in sub.items()))
 
-    col_ok = next((c for c in ("viavel", "passa", "aprovada") if c in r), None)
+    col_ok = next((c for c in ("viavel", "passa", "aprovada", "ok") if c in r), None)
     if col_ok and "R3" in r:
-        print("\n3) viabilidade por R3:")
-        print((r.groupby("R3")[col_ok].mean() * 100).round(1)
-              .to_string() + "  (% viáveis)")
+        print("\n3) viabilidade por R3 (% que passam todos os critérios):")
+        print((r.groupby("R3")[col_ok].mean() * 100).round(1).to_string())
+        print(f"   total viável: {int(r[col_ok].sum())} de {len(r)}")
 
-    print("\nTop 10 por eficiência de ligação:")
+    print("\nTop 10 por eficiência de ligação (o critério que vale):")
     cols = [c for c in ("warhead_id", "R1", "R2", "R3", "best_score",
                         "heavy_atoms", "ligand_efficiency") if c in r]
     print(r.nlargest(10, "ligand_efficiency")[cols].to_string(index=False))
@@ -368,33 +527,51 @@ else:
 """)
 
 # ===========================================================================
+# FASE 4
+# ===========================================================================
 md(r"""
 ---
-# Fase 4 — WP1: o recrutador E3, e o portão que não media nada
+# Fase 4 — WP1: a ligase E3 e o portão que não media nada
 
-**Script:** `scripts/wp1_select_recruiter.py` · **saída:**
-`$PIPELINE_OUT/wp1_recruiter.json`
+**Script:** `scripts/wp1_select_recruiter.py` · **env:** `mdtools` ·
+**custo:** minutos
+**Saída:** `$PIPELINE_OUT/wp1_recruiter.json`
 
-## O que faz
+## O que esta fase faz
 
-Para cada E3 candidata (**VHL** e **CRBN**), o script pega o recrutador do
-co-cristal, revalida o protocolo por redocking, e escolhe o par
-(E3, recrutador) que passa o portão com a melhor geometria. O JSON de saída
-carrega o recrutador escolhido, o **exit point** (onde o linker sai do
-recrutador) e a **direção de saída**.
+Escolhe **qual ligase E3 recrutar** e **por onde o linker sai do recrutador**.
+Para cada E3 candidata — **VHL** e **CRBN** — o script pega o recrutador do
+co-cristal, revalida o protocolo por redocking, identifica o ponto de
+conjugação e a direção de saída, e escolhe o par (E3, recrutador) que passa o
+portão com a melhor geometria.
+
+**Resultado desta execução: CRBN**, do cristal **4TZ4**, com
+
+```
+exit point  = [-41.719, 60.152, -86.692]
+exit vector = [ 0.3075,  0.8534,   0.4209]
+```
+
+A escolha importa muito mais que parece. VHL e CRBN têm geometrias de
+apresentação completamente diferentes, e o comprimento de linker que funciona
+para uma raramente funciona para a outra.
 
 ## O bug que invalidava o portão
 
 O portão do WP1 usava `GetBestRMS` do RDKit. Essa função **superpõe** as duas
 moléculas antes de medir — e, de quebra, **modifica a molécula sonda** no
-processo. O efeito: uma pose a 25 Å do lugar certo dava RMSD **0,00 Å**. O
-portão aprovava qualquer coisa, sem nunca dar erro.
+processo. O efeito: uma pose a **25 Å** do lugar certo dava RMSD **0,00 Å**.
+O portão aprovava qualquer coisa, sem nunca dar erro.
 
 A função correta é `CalcRMS`, que mede *in place*. Mas `CalcRMS` não permite
 restringir a um subconjunto de átomos, e era disso que eu precisava para medir
 só o núcleo enterrado. Está resolvido em `scripts/rmsd_inplace.py`, que
 implementa `rmsd_inplace()` e traz a armadilha documentada no cabeçalho para
-não ser reintroduzida.
+que não seja reintroduzida. O módulo roda sozinho e **demonstra** o defeito:
+
+```bash
+python scripts/rmsd_inplace.py    # GetBestRMS dá 0,00 para pose a 25 Å
+```
 
 > Registro de honestidade: ao diagnosticar isso eu também acusei `CalcRMS` de
 > estar errada. Não estava — meu teste tinha sido contaminado pela mutação que
@@ -402,66 +579,97 @@ não ser reintroduzida.
 
 ## A guarda de farmacóforo
 
-O ponto de conjugação do recrutador tem de ser escolhido, e a escolha automática
-inicial pegou o **NH da glutarimida** da CRBN. Esse NH é justamente o que faz as
-três ligações de hidrogênio com o trio de triptofanos da CRBN: usá-lo como ponto
-de ligação do linker destrói o reconhecimento que o recrutador existe para ter.
+O ponto de conjugação do recrutador tem de ser escolhido, e a escolha
+automática inicial pegou o **NH da glutarimida** da CRBN. Esse NH é justamente
+o que faz as três ligações de hidrogênio com o trio de triptofanos da CRBN:
+usá-lo como ponto de ligação do linker **destrói o reconhecimento que o
+recrutador existe para ter**. A molécula ficaria perfeita no papel e cega na
+célula.
 
 A correção é uma lista de SMARTS de farmacóforo (`FARMACOFOROS`) com exclusão
 ativa: átomos que participam do reconhecimento da E3 não podem ser pontos de
 conjugação, ponto.
+
+## Como rodar
+
+```bash
+python scripts/wp1_select_recruiter.py --e3 "VHL CRBN" --burial 20 \
+    --out $PIPELINE_OUT/wp1_recruiter.json
+```
+
+## O que conferir
+
+- RMSD do redocking de **cada** E3, não só da escolhida
+- que o exit point **não** seja um átomo de farmacóforo
+- a direção de saída aponta para o solvente, não para dentro da proteína
 """)
 
 code(r"""
+# Fase 4 — o recrutador escolhido e a comparação entre E3
 p = OUT / "wp1_recruiter.json"
 if p.exists():
     w1 = json.loads(p.read_text())
     e = w1.get("escolhido", w1)
     print("RECRUTADOR ESCOLHIDO")
-    for k in ("e3", "nome", "pdb", "recruiter_sdf", "rmsd_redocking_A",
-              "exit_point", "exit_direction", "receptor_pdb"):
+    for k in ("e3", "nome", "pdb", "recruiter_sdf", "receptor_pdb",
+              "rmsd_redocking_A", "exit_point", "exit_direction",
+              "exit_atom_idx"):
         if k in e:
             print(f"  {k}: {e[k]}")
     if "por_e3" in w1:
-        print("\nComparação entre E3:")
+        print("\nComparação entre E3 (o portão vale para as duas):")
         for nome, d in w1["por_e3"].items():
-            rm = d.get("rmsd_redocking_A", d.get("rmsd"))
-            print(f"  {nome}: RMSD do redocking = {rm}")
+            rm = d.get("rmsd_redocking_A", d.get("rmsd", "?"))
+            print(f"  {nome:<6s} RMSD do redocking = {rm}")
 else:
     print("wp1_recruiter.json ausente")
 """)
 
 # ===========================================================================
+# FASE 5
+# ===========================================================================
 md(r"""
 ---
 # Fase 5 — WP2: os linkers e a geometria da ponte
 
-**Scripts:** `wp2_linker_tools.py`, `wp2_build_subcomplexes.py` · **saída:**
-`linker_ranking.csv`, `subcomplexes_manifest.json`
+**Scripts:** `wp2_linker_tools.py`, `wp2_build_subcomplexes.py` ·
+**env:** `mdtools` · **custo:** ~1 h
+**Saída:** `linker_ranking.csv`, `subcomplexes_manifest.json`
+
+## O que esta fase faz
+
+Encontra, num catálogo comercial, os linkers que **conseguem atravessar** a
+distância entre o exit point do recrutador e a warhead, na direção certa, sem
+colidir com a E3. É aqui que o PROTAC deixa de ser duas moléculas e passa a ser
+uma ponte com geometria.
 
 ## A biblioteca
 
 **Só Chemspace** — `Chemspace_PROTACs_linkers_SDF.sdf` e
-`Chemspace_PROTACs_anchors_SDF.sdf`. O Enamine ficou fora por decisão sua, e o
+`Chemspace_PROTACs_anchors_SDF.sdf`. O Enamine ficou fora por decisão sua, e
 `config/pipeline.conf` tem `LINKERS_EXTRA=""` reservado caso volte.
 
-Filtros: 5–40 átomos pesados, no máximo 15 ligações rotáveis, e — o critério
-que separa linker de reagente — **bifuncionalidade obrigatória**. Um linker com
-um só ponto de ligação não é linker.
+Filtros aplicados:
+
+| Critério | Valor | Por quê |
+|---|---|---|
+| átomos pesados | 5 – 40 | abaixo não alcança, acima a entropia mata |
+| ligações rotáveis | ≤ 15 | flexibilidade excessiva custa entropia de ligação |
+| **bifuncionalidade** | **obrigatória** | linker com um só ponto de ligação não é linker |
 
 ## Como a geometria é avaliada
 
-Para cada linker, 50 confôrmeros × 12 rotações em torno do eixo de saída. Cada
-confôrmero é **colocado no exit vector do recrutador** e pontuado por: alcance
-(consegue atravessar a distância até a warhead?), clash com o receptor, e
+Para cada linker: **50 confôrmeros × 12 rotações** em torno do eixo de saída.
+Cada confôrmero é **colocado no exit vector do recrutador** e pontuado por
+alcance (atravessa a distância até a warhead?), clash com o receptor, e
 alinhamento com a direção de saída.
 
-O detalhe: a versão original de `exit_vector_score` media clash **sem colocar o
-confôrmero no exit vector**. Media a molécula onde ela estava, na origem do seu
-próprio sistema de coordenadas. Os números saíam, eram plausíveis, e não
-correspondiam a nada. Corrigido em `place_conformer_at_exit` +
-`score_conformer_at_exit`, que são funções separadas de propósito: colocar e
-pontuar são passos distintos e testáveis.
+O detalhe que importa: a versão original de `exit_vector_score` media clash
+**sem colocar o confôrmero no exit vector**. Media a molécula onde ela estava,
+na origem do seu próprio sistema de coordenadas. Os números saíam, eram
+plausíveis, e não correspondiam a nada. Corrigido em `place_conformer_at_exit`
++ `score_conformer_at_exit` — funções separadas de propósito: **colocar** e
+**pontuar** são passos distintos e testáveis isoladamente.
 
 ## Três armadilhas de SMARTS
 
@@ -469,12 +677,13 @@ Encontrar amina terminal por SMARTS é mais difícil do que parece.
 
 | Tentativa | O que quebra |
 |---|---|
-| `[NH2]` | casa aminas **não terminais**, aceitando linkers que não podem ser conjugados |
-| `!$(N[!#6])` | exclui qualquer N com hidrogênio **explícito** — rejeitaria silenciosamente **todos** os linkers amino-terminados, que são a química dominante do catálogo Chemspace |
+| `[NH2]` | casa aminas **não terminais** — aceita linkers que não podem ser conjugados ali |
+| `!$(N[!#6])` | exclui qualquer N com hidrogênio **explícito**: rejeitaria silenciosamente **todos** os linkers amino-terminados, que são a química dominante do catálogo Chemspace |
 | **`[NX3;H2;!$(N[!#6;!#1])][CX4]`** | o que ficou: N trivalente, dois H, vizinhos só C ou H, ligado a carbono sp³ |
 
-A segunda linha é o tipo de erro mais perigoso deste pipeline: ela não falharia,
-ela devolveria zero linkers válidos e a conclusão seria "o catálogo não serve".
+A segunda linha é o tipo de erro mais perigoso deste pipeline: ela não
+falharia. Devolveria **zero** linkers válidos, e a conclusão seria "o catálogo
+não serve" — uma conclusão sobre o catálogo tirada de um bug no filtro.
 
 ## Rótulos, não posições
 
@@ -482,16 +691,45 @@ Os pontos de ligação do linker são marcados como `[1*]` (lado do recrutador) 
 `[2*]` (lado da warhead) por `label_attachment_points`. A montagem da fase 6
 **exige** os dois rótulos e levanta exceção se faltar um. O motivo está na
 próxima seção.
+
+## Como rodar
+
+```bash
+python scripts/wp2_build_subcomplexes.py \
+    --linkers $WORK/chemspace_linkers/Chemspace_PROTACs_linkers_SDF.sdf \
+    --anchors $WORK/chemspace_anchors/Chemspace_PROTACs_anchors_SDF.sdf \
+    --recruiter $PIPELINE_OUT/wp1_recruiter.json --nconfs 50 --nspins 12
+```
+
+Autoteste que demonstra os defeitos corrigidos:
+
+```bash
+python scripts/wp2_linker_tools.py
+```
+
+## O que conferir
+
+- quantos linkers sobraram depois do filtro (zero = suspeite do filtro, não do
+  catálogo)
+- a distribuição de alcance: se nenhum atravessa, o problema é o exit vector
+- os sub-complexos montados têm o `[2*]` livre para a warhead
 """)
 
 code(r"""
+# Fase 5 — linkers avaliados e sub-complexos montados
 p = OUT / "linker_ranking.csv"
 if p.exists():
     lk = pd.read_csv(p)
     print(f"{len(lk)} linkers avaliados")
+    num = [c for c in ("heavy_atoms", "n_rotb", "reach_A", "clash",
+                       "cos_exit", "score") if c in lk]
+    if num:
+        print("\nfaixas:")
+        print(lk[num].describe().loc[["min", "50%", "max"]].round(3).to_string())
     cols = [c for c in ("linker_id", "smiles", "heavy_atoms", "n_rotb",
                         "reach_A", "clash", "cos_exit", "score") if c in lk]
     ordem = "score" if "score" in lk else cols[-1]
+    print(f"\nTop 10 por {ordem}:")
     print(lk.nlargest(10, ordem)[cols].to_string(index=False))
 else:
     print("linker_ranking.csv ausente")
@@ -503,38 +741,50 @@ if p.exists():
 """)
 
 # ===========================================================================
+# FASE 6
+# ===========================================================================
 md(r"""
 ---
-# Fase 6 — WP3: montar os PROTACs
+# Fase 6 — WP3: montar os PROTACs completos
 
-**Script:** `scripts/wp3_assemble_protacs.py` · **saída:**
-`protac_candidates.csv`, um diretório por candidato
+**Script:** `scripts/wp3_assemble_protacs.py` · **env:** `mdtools` ·
+**custo:** minutos
+**Saída:** `protac_candidates.csv`, um diretório por candidato com
+`protac.smi`, `prosetta_config.txt`, e os lançadores `launch_all.sh` /
+`launch_one.sh`
+
+## O que esta fase faz
+
+Costura recrutador + linker + warhead numa única molécula, com coordenadas 3D
+consistentes com as poses que passaram pelos portões, e emite os arquivos de
+entrada para a predição de complexo ternário (PRosettaC) e para a MD.
 
 ## O bug que teria estragado o lote inteiro, em silêncio
 
 A primeira versão montava em duas etapas: `cap_free_terminus` e depois
 `assemble_full_protac`, ambas com `ReplaceSubstructs`. E `ReplaceSubstructs`,
-quando o padrão **não casa**, não levanta erro: devolve a molécula **inalterada**
-dentro de uma tupla de um elemento. O código seguia adiante feliz.
+quando o padrão **não casa**, não levanta erro: devolve a molécula
+**inalterada** dentro de uma tupla de um elemento. O código seguia adiante
+feliz.
 
 O resultado seria um lote completo de "PROTACs" que são, de fato, apenas
-recrutador + linker, **sem warhead nenhuma** — moléculas válidas, com SMILES
+**recrutador + linker, sem warhead nenhuma** — moléculas válidas, com SMILES
 bonitos, que passariam pelo ranking e chegariam à MD. Dias de GPU para simular
-a molécula errada.
+a molécula errada, e um resultado publicável e falso.
 
 A correção tem duas partes: os rótulos `[1*]`/`[2*]` da fase 5, e um
 `assemble_protac` que **levanta exceção** se o `[2*]` não estiver presente. A
-lição geral: quando uma API devolve "não fiz nada" com o mesmo tipo de
-"fiz", a verificação tem de ser explícita.
+lição geral: **quando uma API devolve "não fiz nada" com o mesmo tipo de "fiz",
+a verificação tem de ser explícita.**
 
 ## O outro problema: o PDBQT perde informação
 
-A pose que sai do Uni-Dock está em **PDBQT**, um formato que descarta **ordens
-de ligação e hidrogênios**. Reconstruir a molécula a partir dele produziu:
+A pose que sai do Uni-Dock está em **PDBQT**, formato que descarta **ordens de
+ligação e hidrogênios**. Reconstruir a molécula a partir dele produziu:
 
 ```
 33 elétrons radicalares
-Explicit valence for atom N, 6 ...        (75 falhas de montagem)
+Explicit valence for atom N, 6 ...          (75 falhas de montagem)
 antechamber: number of electrons is odd (429)
 ```
 
@@ -544,328 +794,244 @@ Casar os átomos dos dois lados exigiu quatro estratégias em cascata; o que
 funcionou nos dados reais foi `AdjustQueryProperties(makeBondsGeneric)` seguido
 de alinhamento por MCS (`rdFMCS` com `CompareAny` e `ringMatchesRingOnly`).
 
-## E a identificação do catálogo
+## E a identificação no catálogo
 
 Identificar o composto de catálogo **pelo índice** estava errado: o índice 87
 tinha 22 átomos onde a pose tinha 37 — os arquivos não estavam na mesma ordem.
 Passou a ser por **InChIKey do esqueleto**, que independe de ordem: índice 209.
+
+## Como rodar
+
+```bash
+python scripts/wp3_assemble_protacs.py --subcomplexes $PIPELINE_OUT \
+    --warheads ~/PCSK9_docking --n-linkers 10 --n-warheads 15
+```
+
+## O que conferir
+
+- **cada candidato tem warhead** (é literalmente o bug acima; confira a massa
+  molar: recrutador + linker sozinhos ficam bem abaixo de 700 Da)
+- zero radicais e valências válidas
+- o `Anchor atoms` do `prosetta_config.txt` — a convenção 0-based *vs* 1-based
+  varia por build, e um lote inteiro com o átomo errado é um lote perdido
 """)
 
 code(r"""
+# Fase 6 — os PROTACs montados
 p = OUT / "protac_candidates.csv"
 if p.exists():
     pc = pd.read_csv(p)
     print(f"{len(pc)} PROTACs montados")
     cols = [c for c in ("candidate_id", "warhead_id", "linker_id", "protac_mw",
-                        "n_rotb", "formal_charge", "protac_smiles") if c in pc]
+                        "n_rotb", "formal_charge") if c in pc]
     print(pc[cols].head(10).to_string(index=False))
     if "protac_mw" in pc:
-        print(f"\nMassa molar: {pc['protac_mw'].min():.0f} – "
-              f"{pc['protac_mw'].max():.0f} Da "
+        print(f"\nmassa molar: {pc['protac_mw'].min():.0f} – "
+              f"{pc['protac_mw'].max():.0f} Da  "
               f"(mediana {pc['protac_mw'].median():.0f})")
+        baixas = pc[pc["protac_mw"] < 600]
+        if len(baixas):
+            print(f"  [ATENÇÃO] {len(baixas)} candidato(s) abaixo de 600 Da — "
+                  f"leves demais para ter as três partes; confira se a warhead "
+                  f"entrou")
+    if "n_rotb" in pc:
+        print(f"ligações rotáveis: {pc['n_rotb'].min()} – {pc['n_rotb'].max()}")
 else:
     print("protac_candidates.csv ausente")
 """)
 
 # ===========================================================================
+# FASE 7
+# ===========================================================================
 md(r"""
 ---
-# Fase 7 — ranquear e escolher **um** candidato
+# Fase 7 — Ranquear, e escolher **um**
 
-**Script:** `scripts/rank_protacs.py` · **saída:** `protac_ranking.csv`,
-`md_candidato.json`
+**Script:** `scripts/rank_protacs.py` · **env:** `mdtools` · **custo:** segundos
+**Saída:** `protac_ranking.csv`, `md_candidato.json`
 
-A MD de nível (ii) custa dias de GPU por candidato. Simular todos é inviável,
-então a fase 7 existe para transformar a lista em uma **fila**: um escore
-composto que combina a qualidade da warhead (eficiência de ligação, não score
-bruto), a geometria do linker no exit vector, o desvio do recrutador em relação
-à pose docada, e penalidades de flexibilidade e massa.
+## O que esta fase faz
 
-O `md_candidato.json` guarda o candidato de posto 1 — e a fila continua ali. Se
-a MD reprovar o primeiro, basta mudar `MD_RANK=2` no `config/pipeline.conf` e
-relançar: nada precisa ser recalculado.
+A MD de nível (ii) custa **dias de GPU por candidato**. Simular todos é
+inviável, então esta fase transforma a lista em uma **fila**: um escore
+composto que combina
 
-## O candidato que está rodando
+- a qualidade da warhead (**eficiência de ligação**, não score bruto)
+- a geometria do linker no exit vector
+- o desvio do recrutador em relação à pose docada
+- penalidades de flexibilidade e massa
+
+O `md_candidato.json` guarda o candidato de posto 1 — e a fila **continua ali**.
+Se a MD reprovar o primeiro, basta mudar `MD_RANK=2` em
+`config/pipeline.conf` e relançar: nada é recalculado.
+
+## O candidato que está na MD
 
 | | |
 |---|---|
 | **ID** | `SC0006__WH023` |
 | warhead | **WH023** — R1 = OPh, R2 = OH, R3 = tetrazol |
 | linker | `NCCOCCOCCO` (tri-etilenoglicol amino-terminado) |
-| massa molar | 802,9 Da |
+| E3 | **CRBN** (cristal 4TZ4) |
+| massa molar | **802,9 Da** |
 | ligações rotáveis | 19 |
 | carga formal | 0 |
 | escore composto | 0,814 |
-| desvio do recrutador em relação ao docking | **0,000 Å** |
+| átomos do recrutador travados | 29 |
+| **desvio do recrutador vs. docking** | **0,000 Å** |
 
-Vale notar o que esse último número diz: o recrutador na geometria de partida da
-MD está exatamente onde o docking o colocou. A conformação que a MD vai testar
-não foi inventada pelo gerador de confôrmeros — ela preserva a pose que passou
-pelo portão de validação.
+Aquele último número é o que mais importa: o recrutador, na geometria de
+partida da MD, está **exatamente** onde o docking o colocou. A conformação que
+a MD vai testar não foi inventada pelo gerador de confôrmeros — ela preserva a
+pose que passou pelo portão de validação.
 
-E vale notar o que o candidato **não** tem: 802,9 Da e 19 rotáveis estão bem
-fora de Lipinski. Isso é normal e esperado em PROTACs, que ocupam o espaço
-"beyond rule of five" — mas é um ponto a tratar explicitamente na tese, não a
-esconder.
+E vale registrar o que o candidato **não** tem: 802,9 Da e 19 rotáveis estão
+bem fora de Lipinski. Isso é **normal e esperado** em PROTACs, que ocupam o
+espaço *beyond rule of five* — mas é um ponto a tratar explicitamente na tese,
+não a esconder. A permeabilidade celular é o gargalo conhecido da classe.
+
+## Como rodar
+
+```bash
+python scripts/rank_protacs.py --candidates $PIPELINE_OUT/protac_candidates.csv \
+    --out $PIPELINE_OUT/protac_ranking.csv
+```
+
+## O que conferir
+
+- o desvio do recrutador do posto 1 (acima de 0,5 Å já merece atenção: a MD
+  partiria de uma geometria que a triagem não validou)
+- se os primeiros postos são todos do mesmo linker ou da mesma warhead, a
+  diversidade da fila é baixa e o plano B se parece demais com o plano A
 """)
 
 code(r"""
+# Fase 7 — a fila e o candidato escolhido
 p = OUT / "protac_ranking.csv"
 if p.exists():
     rk = pd.read_csv(p)
     cols = [c for c in ("rank", "candidate_id", "warhead_id", "linker_id",
-                        "score_composto", "protac_mw", "n_rotb") if c in rk]
-    print("FILA DA MD (os 10 primeiros)")
+                        "score_composto", "protac_mw", "n_rotb",
+                        "desvio_recrutador_A") if c in rk]
+    print("FILA DA MD — os 10 primeiros")
     print(rk.head(10)[cols].to_string(index=False))
+    for col, rot in (("warhead_id", "warheads"), ("linker_id", "linkers")):
+        if col in rk:
+            n = rk.head(10)[col].nunique()
+            print(f"  diversidade no top-10: {n} {rot} distintos")
+else:
+    print("protac_ranking.csv ausente")
 
 p = OUT / "md_candidato.json"
 if p.exists():
-    print("\nCANDIDATO ESCOLHIDO")
+    print("\nCANDIDATO ESCOLHIDO (MD_RANK do pipeline.conf)")
     for k, v in json.loads(p.read_text()).items():
         print(f"  {k}: {v}")
 """)
 
 # ===========================================================================
+# FASE 8
+# ===========================================================================
 md(r"""
 ---
-# Fase 8 — a MD, e a cadeia de sete obstáculos
+# Fase 8 — A dinâmica molecular
 
-**Scripts:** `md_prepare.py`, `fix_receptor_for_md.py`, `build_topology.py`,
-`build_index.py`, `md_run.sh`, `md_analyze.py`
+**Scripts:** `md_prepare.py`, `fix_receptor_for_md.py`, `split_chain_gaps.py`,
+`build_topology.py`, `build_index.py`, `md_run.sh`, `explain_lincs.py`,
+`md_analyze.py` · **envs:** `mdtools` + GROMACS 2026.2 · **custo:** dias (GPU)
 
-## O que a MD pergunta
+## O que esta fase pergunta
 
-O nível (ii) simula **E3 ligase + recrutador-linker-warhead** — o lado da ponte
-que é possível montar sem depender de uma predição de complexo ternário. A
-pergunta é concreta: ao longo de 200 ns, o recrutador **fica** no bolso da E3
-enquanto o resto da molécula se mexe, ou o linker arrasta o recrutador para
-fora?
+O **nível (ii)** simula **E3 ligase + recrutador-linker-warhead** — o lado da
+ponte que é possível montar sem depender de uma predição de complexo ternário.
+A pergunta é concreta:
 
-**Protocolo:** AMBER ff14SB + TIP3P, GAFF2/AM1-BCC para o PROTAC (acpype),
-caixa cúbica de 1,3 nm, neutralização, minimização (steep), NVT 0,1 ns,
-NPT 5 ns com restrições de posição, e **200 ns × 3 réplicas** com sementes
-diferentes. Termostato Nose-Hoover, barostato Parrinello-Rahman, cortes em
-0,9 nm, LINCS em h-bonds.
+> Ao longo de 200 ns, o recrutador **fica** no bolso da CRBN enquanto o resto
+> da molécula se mexe, ou o linker arrasta o recrutador para fora?
 
-Três réplicas não é luxo: é a única forma de distinguir "o complexo é estável"
-de "aquela trajetória em particular foi sortuda".
+É a pergunta que o docking não pode responder, porque o docking é estático e
+o problema do PROTAC é dinâmico. Um recrutador que escapa em 50 ns não vai
+sustentar a transferência de ubiquitina, por bom que seja o score.
 
-## Os obstáculos, em ordem, e por que cada um era o que era
+**Três réplicas não são luxo:** é a única forma de distinguir "o complexo é
+estável" de "aquela trajetória em particular foi sortuda".
 
-Esta é a parte mais útil deste registro, porque cada obstáculo aqui é um caso em
-que o pipeline **parecia** funcionar.
+## O protocolo
 
-### 1. `Incomplete ring in HIS68`
+| | |
+|---|---|
+| campo de força da proteína | **AMBER ff14SB** |
+| água | **TIP3P**, caixa cúbica com 1,3 nm de folga |
+| ligante | **GAFF2 + AM1-BCC** via acpype (~27 min) |
+| eletrostática | PME, cortes de 0,9 nm |
+| vínculos | LINCS em h-bonds, `lincs-order 8`, `lincs-iter 2` |
+| termostato (produção) | **Nose-Hoover**, τ = 1,0 ps, 310 K |
+| barostato | **Parrinello-Rahman**, τ = 2,0 ps, 1 bar |
+| produção | **200 ns × 3 réplicas**, dt = 2 fs |
+| gravação | 1000 frames por réplica, um a cada 200 ps |
 
-Cristais têm cadeias laterais parcialmente resolvidas — 15 resíduos, neste caso.
-O `pdb2gmx` recusa a estrutura e está certo em recusar. `fix_receptor_for_md.py`
-reconstrói as cadeias laterais no ChimeraX headless via `swapaa`, e verifica o
-resultado: **15 → 0 incompletos**.
-
-Pelo caminho, três detalhes de sintaxe do ChimeraX que custaram tempo:
-`delete ~(/A,/B)` é inválido (é `~/A,B`); `:063` é ambíguo (é `::name="063"`);
-e sem `--exit` o ChimeraX fica esperando em `cmd>` para sempre, o que num
-pipeline em background parece um travamento.
-
-Uma nota sobre `swapaa ... criteria highest`: não existe. Os critérios são
-letras (`d`/`c`/`h`/`p`), e passar `highest` dá `Unknown criteria: 'i'` — a
-mensagem cita a segunda letra, o que torna o erro mais difícil de ler do que
-precisava.
-
-### 2. Ligações peptídicas que não existem
-
-O `pdb2gmx` avisou, e o aviso passou batido:
+### O sistema, em números
 
 ```
-Long Bond (1247-1249 = 0.558481 nm)
-Long Bond (3358-3360 = 1.39835 nm)
+CRBN 4TZ4, cadeia C     361 resíduos, 2908 átomos do cristal
+depois do pdb2gmx       5829 átomos (com hidrogênios), carga +5
+PROTAC                  105 átomos
+complexo                5934 átomos
+solvatado               111.819 átomos (35.295 águas)
+neutralizado            111.809 átomos (5 CL substituindo águas)
+grupos de acoplamento   Protein_LIG 5934  |  Water_and_ions 105.875
 ```
 
-Uma ligação peptídica mede **0,133 nm**. Essas medem de 0,56 a 1,40 nm. O
-cristal 4TZ4 da CRBN tem alças não resolvidas, e o `pdb2gmx`, vendo uma cadeia
-contínua no arquivo, criou ligações entre os resíduos que **ladeiam** cada
-lacuna — resíduos que estão a nanômetros de distância. Os índices diferem de 2,
-que é o padrão de `C(i)–N(i+1)` com o `O` no meio: são ligações peptídicas
-falsas.
+### O equilíbrio, em degraus
 
-Uma mola harmônica esticada dez vezes tem energia para desmontar o sistema. E o
-sintoma **não se parece com a causa**:
+Isto **não** é o protocolo que eu escrevi primeiro. O primeiro estourava; o que
+está abaixo é o que funciona, e a razão de cada degrau está no Apêndice A.
 
-```
-Step 5  LINCS WARNING ... 539 540   0.9983  863453.1250   0.1090
-CUDA error #700 (cudaErrorIllegalAddress): an illegal memory access
-```
+| etapa | dt | duração | termostato | restrições |
+|---|---|---|---|---|
+| `em` | — | `emtol 1000`, tudo flexível | — | — |
+| `em2` | — | `emtol 100`, `emstep 0.001` | — | — |
+| `warm` | 0,5 fs | 20 ps, partindo de 100 K | V-rescale | soluto preso |
+| `nvt` | 1 fs | 100 ps | V-rescale | soluto preso |
+| `npt` | 2 fs | 5 ns | V-rescale + P-R | soluto preso |
+| `prod` | 2 fs | **200 ns × 3** | **Nose-Hoover** + P-R | livre |
 
-O erro de CUDA é consequência de a placa tocar coordenadas que viraram lixo —
-na CPU o mesmo sistema estouraria com outra mensagem. Quem persegue o erro de
-CUDA procura driver, versão, memória da GPU; nada disso tem a ver.
+O **Nose-Hoover** da metodologia fica onde importa: na produção. Ele reproduz o
+ensemble canônico corretamente, mas **não é robusto longe do equilíbrio** —
+oscila, e num sistema recém-solvatado a oscilação vira estouro. O equilíbrio
+usa **V-rescale**, que é dissipativo e perdoa geometria ruim. A escolha do
+termostato de equilíbrio é detalhe prático e vale declará-la como tal.
 
-`split_chain_gaps.py` mede o `C–N` de cada par consecutivo e insere `TER` onde
-a distância passa de 2,5 Å. O `pdb2gmx` então trata cada segmento como cadeia
-própria, e a carga total não muda: cada corte soma um NH3+ (+1) e um COO- (−1).
-O script também avisa quando uma lacuna cai a menos de 12 Å do ligante — ali os
-términos carregados ficam perto do sítio, e o certo passa a ser modelar a alça
-em vez de cortá-la.
+A referência das restrições de posição é **sempre `em2.gro`**, nunca a etapa
+anterior: encadear referências deixaria o soluto derivar degrau a degrau e
+chegar na produção longe da pose do docking.
 
-Depois disso, o `md_run.sh` **verifica**: sobrando qualquer `Long Bond` no log
-do `pdb2gmx`, ele para, porque uma ligação longa aqui vira estouro dez minutos
-adiante e o erro de então não aponta para cá.
+### O receptor teve de ser consertado duas vezes
 
-### 3. `[ atomtypes ]` depois de `[ moleculetype ]`
+**Cadeias laterais incompletas.** Cristais têm resíduos parcialmente
+resolvidos — 15 neste caso. O `pdb2gmx` recusa a estrutura
+(`Incomplete ring in HIS68`) e está certo em recusar.
+`fix_receptor_for_md.py` reconstrói no ChimeraX headless via `swapaa` e
+**verifica**: 15 → 0 incompletos.
 
-O `.itp` do acpype traz as duas seções no mesmo arquivo. O GROMACS exige que
-**todo** `[ atomtypes ]` venha antes da primeira molécula, e o `topol.top` do
-`pdb2gmx` já define a proteína logo após o campo de força. Um `#include` único,
-em qualquer posição, viola a ordem:
+**Lacunas na cadeia.** O 4TZ4 tem alças não resolvidas, e o `pdb2gmx`, vendo
+uma cadeia contínua no arquivo, criou **ligações peptídicas entre resíduos que
+estão a nanômetros de distância**. `split_chain_gaps.py` mede o C–N de cada par
+consecutivo e insere `TER` onde passa de 2,5 Å. As quatro lacunas encontradas
+batem uma a uma com os quatro avisos `Long Bond` do GROMACS:
 
-```
-Fatal error: Invalid order for directive atomtypes
-```
-
-`build_topology.py` separa o arquivo em dois — tipos de átomo e molécula — e
-insere cada um no lugar certo. Depois **verifica** a ordem final expandindo os
-includes.
-
-Meta-erro divertido: meu próprio verificador reprovou meu próprio comentário,
-porque ele continha o texto `[ moleculetype ]`. O GROMACS ignora tudo depois de
-`;`, e o verificador passou a ignorar também.
-
-### 4. A retomada guardava o arquivo errado
-
-`md_run.sh` pulava o `pdb2gmx` se `topol.top` existisse. Mas o `pdb2gmx` **cria**
-o `topol.top` antes de terminar: uma execução que morreu no meio (a do HIS68)
-deixou o arquivo no disco, e a retomada concluiu que a etapa tinha dado certo.
-Todos os passos seguintes reclamaram de "file does not exist", e o erro que
-aparecia no log era o **último**, não o primeiro.
-
-Duas correções: a guarda passou a olhar a saída **final** de cada etapa
-(`complexo.gro`), e todo comando passa por `gmx_ok`, que confere o código de
-saída **e** a existência do arquivo esperado.
-
-### 5. O `make_ndx` que nunca poderia funcionar
-
-Os `tc-grps` dos `.mdp` precisam nomear grupos que existam no índice. A versão
-escrita à mão adivinhava os números (`1 | 13`, `name 22 Protein_PTC`) e supunha
-que o resíduo do ligante se chamasse `PTC`.
-
-Só que o acpype batiza a *moleculetype* como se pede em `-b`, mas propaga para o
-`.gro` o resíduo que veio do PDB do RDKit — e o default do RDKit é **`UNL`**:
-
-```
-Group    12 (          Other) has   105 elements
-Group    13 (            UNL) has   105 elements
-```
-
-Um grupo `Protein_PTC` nunca apareceria, por mais que o número estivesse certo.
-
-`build_index.py` não adivinha nada: roda `make_ndx` só para **listar**, lê os
-números pelos nomes, identifica o ligante como o menor grupo que não é proteína,
-água nem íon (assim `UNL`, `PTC`, `LIG` ou `MOL` são achados igualmente), monta
-as fusões com os números reais, e **verifica** o índice antes de aceitá-lo: os
-dois grupos têm de existir e a soma deles tem de cobrir o sistema inteiro — um
-átomo sem acoplamento térmico faz o `grompp` recusar a simulação. Se a
-verificação falha, o índice pela metade é **apagado**, não deixado no disco para
-a próxima retomada aceitar.
-
-Dois cuidados a mais: os nomes dos grupos passaram a ser fixos
-(`Protein_LIG`/`Water_and_ions`), então os `.mdp` não dependem mais do nome do
-resíduo; e um `Water_and_ions` que o GROMACS já tenha criado é **reaproveitado**
-em vez de duplicado, para o `grompp` não ter de escolher entre homônimos.
-
-### 6. O nome do resíduo, resolvido nas duas pontas
-
-`md_prepare.py` agora batiza o resíduo como `PTC` na única vez em que as
-coordenadas são escritas, e `md_analyze.py` **descobre** o nome na trajetória
-quando o pedido não está lá (tirando proteína, água e íons, o que sobra é o
-PROTAC). A primeira correção conserta o futuro; a segunda faz a análise
-funcionar no sistema que já está parametrizado como `UNL`, sem refazer os 27
-minutos de acpype.
-
-### 7. O offload total da GPU nem sempre é aceito
-
-`-nb gpu -pme gpu -bonded gpu -update gpu` é o ideal numa Blackwell de 32 GB,
-onde o sistema inteiro (111.809 átomos) cabe na placa. Mas o GROMACS **recusa**
-`-update gpu` em algumas combinações desta metodologia — o termostato
-Nose-Hoover e as restrições de posição do equilíbrio são os casos conhecidos — e
-a recusa é um erro de configuração que mata a etapa em segundos.
-
-Em vez de escolher de antemão, `mdrun_ok` desce uma escada: offload total →
-`-nb gpu -pme gpu` → CPU. Mas **só** quando a mensagem do próprio GROMACS é
-sobre offload. Um erro de física (LINCS, explosão) falha de uma vez, porque
-repetir três vezes uma simulação que vai estourar de novo custaria horas por
-nada.
-
-### 8. O equilíbrio partia longe demais do equilíbrio
-
-Com a cadeia corrigida, o NVT ainda estourava — mas por outra razão, e o log
-dizia qual se soubesse lê-lo:
-
-```
-Steepest Descents converged to Fmax < 1000 in 1576 steps
-Maximum force = 9.9462659e+02 on atom 570
-```
-
-A minimização convergiu **raspando**: 994,6 contra tolerância de 1000. E a
-força residual estava no átomo 570, enquanto a explosão começava nos átomos
-539–540 — mesma vizinhança. O sistema não estava globalmente tenso (−1,70×10⁶
-kJ/mol é normal para 111 mil átomos): havia um **nó local**, e o minimizador
-parou no instante em que cruzou o limiar, deixando-o intacto.
-
-Duas coisas erradas no protocolo, ambas de manual:
-
-**A minimização rodava com `constraints = h-bonds` e água rígida.** O padrão é
-minimizar com `constraints = none` e `define = -DFLEXIBLE`, justamente porque o
-LINCS tentando satisfazer vínculos numa geometria tensa é fonte clássica de
-estouro. Passou a haver duas: uma grossa (`emtol 1000`) e uma fina
-(`emtol 100`, `emstep 0.001`) que não deixa o minimizador parar raspando.
-
-**O NVT partia direto a 310 K com Nose-Hoover e `dt = 2 fs`.** O Nose-Hoover
-reproduz o ensemble canônico corretamente, mas **não é robusto longe do
-equilíbrio** — oscila, e num sistema recém-solvatado a oscilação vira estouro.
-O equilíbrio passou a usar **V-rescale**, que é dissipativo e perdoa geometria
-ruim, subindo `dt` em degraus:
-
-| etapa | dt | duração | termostato |
+| lacuna | C–N medido | `Long Bond` do pdb2gmx | distância ao ligante |
 |---|---|---|---|
-| `em` | — | `emtol 1000`, tudo flexível | — |
-| `em2` | — | `emtol 100` | — |
-| `warm` | 0,5 fs | 20 ps, partindo de 100 K | V-rescale |
-| `nvt` | 1 fs | 100 ps | V-rescale |
-| `npt` | 2 fs | 5 ns | V-rescale + Parrinello-Rahman |
-| `prod` | 2 fs | 200 ns × 3 | **Nose-Hoover** + Parrinello-Rahman |
+| SER126 \| GLU132 | 5,58 Å | 0,558481 nm | 17,1 Å |
+| THR172 \| GLY176 | 7,00 Å | 0,699799 nm | 16,3 Å |
+| VAL213 \| SER220 | 8,15 Å | 0,814510 nm | 42,7 Å |
+| ASP265 \| SER272 | 13,98 Å | 1,398350 nm | 29,0 Å |
 
-O Nose-Hoover da metodologia fica onde importa: na produção, que é o que vai
-para a tese. A escolha do termostato de equilíbrio é detalhe prático, e vale
-declará-lo como tal.
-
-Um efeito colateral que não era o objetivo: o `-update gpu` **aceita**
-V-rescale e recusa Nose-Hoover. Trocar o termostato do equilíbrio destravou o
-offload total da GPU nessas etapas, sem que a escada precisasse descer nenhum
-degrau.
-
-A referência das restrições de posição passou a ser sempre `em2.gro`, nunca a
-etapa anterior: encadear referências deixaria o soluto derivar degrau a degrau
-e chegar na produção longe da pose do docking.
-
-E um erro meu, pego em teste antes de rodar: reusei a função que converte ns em
-passos para o intervalo de gravação, que está em ps. Saía
-`nstxout-compressed = 1e8` num run de `1e8` passos — **um único frame em
-200 ns**, e a análise sem nada para medir. São duas funções agora, com a unidade
-no nome.
-
-### 9. "Átomo 539" não diz nada
-
-O GROMACS relata instabilidade por índice de átomo. `explain_lincs.py` mapeia os
-índices pelo `neutro.gro` e nomeia os resíduos, porque a correção depende de
-quem seja: água encravada é problema do `solvate` e dos raios de VdW adivinhados
-por nome de átomo; o ligante aponta para a geometria de partida do PROTAC; só
-proteína aponta para um rotâmero reconstruído preso num mínimo local.
-
-### 10. Retomada de verdade na produção
-
-200 ns × 3 réplicas é medido em dias. Havendo checkpoint, o `mdrun` retoma com
-`-cpi` em vez de recomeçar. Sem isso, uma queda na 190ª nanosegundo custaria a
-réplica inteira.
+**Para a tese:** 4 quebras de cadeia introduzidas nas lacunas do 4TZ4, todas a
+**mais de 16 Å do sítio**, carga total preservada em **+5** (cada corte soma um
+NH3+ e um COO−, que se cancelam). Se alguma lacuna caísse dentro do bolso, o
+correto seria **modelar a alça**, não cortá-la — e o script avisa quando isso
+acontece.
 
 ## Os critérios do veredito
 
@@ -877,63 +1043,123 @@ réplica inteira.
 | RMSD do PROTAC | ≤ 5,0 Å | generoso de propósito: o PROTAC **é** flexível; o que não pode é o recrutador sair |
 | contatos do recrutador | mantidos | é o que a MD existe para medir |
 
-Reprovando, a fila da fase 7 já tem o próximo: `MD_RANK=2`.
+Reprovando, a fila da fase 7 já tem o próximo: `MD_RANK=2` e relançar.
+
+## Como rodar
+
+O pipeline faz tudo sozinho. Para deixar rodando e desligar o notebook:
+
+```bash
+rm -f $PIPELINE_OUT/.done_8
+setsid bash ~/Protac_env/scripts/run_pipeline.sh > ~/pipeline.log 2>&1 &
+disown -a
+```
+
+Acompanhar:
+
+```bash
+bash ~/Protac_env/scripts/status.sh
+```
+
+> **Não apague arquivos para relançar.** Cada etapa se guarda pela própria
+> saída, então o script sabe o que pular — mas ele **não** sabe distinguir um
+> arquivo que você apagou de propósito de um que nunca existiu. Apagar as
+> saídas do equilíbrio com a produção em andamento não derruba a réplica que
+> já roda, mas derrubaria a próxima (hoje o `npt.gro` é recuperado de um
+> `prod.tpr`, justamente por isso).
 """)
 
 code(r"""
-# Estado do sistema montado para a MD
+# Fase 8 — o sistema montado para a MD
 p = MD / "md_sistema.json"
 if p.exists():
-    for k, v in json.loads(p.read_text()).items():
+    info = json.loads(p.read_text())
+    print("SISTEMA DA MD")
+    for k, v in info.items():
         print(f"  {k}: {v}")
+    d = info.get("desvio_do_docking_A")
+    if d is not None:
+        print(f"\n  -> recrutador a {d} Å da pose do docking"
+              + ("  (a MD parte da geometria validada)" if d <= 0.5 else
+                 "  [ATENÇÃO] acima de 0,5 Å"))
 else:
-    print("md_sistema.json ausente")
+    print("md_sistema.json ausente — a fase 8 ainda não preparou o sistema")
 """)
 
 code(r"""
-# Progresso da MD, sem tocar em nada: tamanho das trajetórias e último log
-import subprocess
-for rep in sorted(MD.glob("rep*")):
-    xtc, log = rep / "prod.xtc", rep / "prod.log"
-    if xtc.exists():
-        print(f"{rep.name}: prod.xtc = {xtc.stat().st_size/1e6:.1f} MB"
-              f"{'  [CONCLUÍDA]' if (rep/'prod.gro').exists() else ''}")
-    if log.exists():
-        # no .log do GROMACS o cabeçalho "Step  Time" vem numa linha e os
-        # valores na seguinte; imprimir só o cabeçalho não diz nada
-        ls = log.read_text(errors="ignore").splitlines()
-        idx = [i for i, l in enumerate(ls) if l.split()[:1] == ["Step"]]
-        if idx and idx[-1] + 1 < len(ls):
-            passo, tempo = (ls[idx[-1] + 1].split() + ["?", "?"])[:2]
-            print(f"   passo {passo} = {tempo} ps")
-if not any(MD.glob("rep*")):
-    print("nenhuma réplica iniciada ainda — a MD está no preparo/equilíbrio")
-    for f in ("proteina.gro", "complexo.gro", "neutro.gro", "grupos.ndx",
-              "em.gro", "nvt.gro", "npt.gro"):
-        print(f"  {'OK' if (MD/f).exists() else '--'} {f}")
+# Fase 8 — progresso, sem tocar em nada
+import re
+
+etapas = ["protac.pdb", "complexo.pdb", "topol.top", "complexo.gro",
+          "neutro.gro", "grupos.ndx", "em.gro", "em2.gro", "warm.gro",
+          "nvt.gro", "npt.gro"]
+print("PREPARO E EQUILÍBRIO")
+for f in etapas:
+    print(f"  {'[x]' if (MD / f).exists() else '[ ]'} {f}")
+
+reps = sorted(MD.glob("rep*"))
+if reps:
+    print("\nPRODUÇÃO (200 ns por réplica)")
+    for rep in reps:
+        if (rep / "prod.gro").exists():
+            print(f"  {rep.name}: CONCLUÍDA")
+            continue
+        log = rep / "prod.log"
+        if log.exists():
+            ls = log.read_text(errors="ignore").splitlines()
+            idx = [i for i, l in enumerate(ls) if l.split()[:1] == ["Step"]]
+            if idx and idx[-1] + 1 < len(ls):
+                campos = ls[idx[-1] + 1].split()
+                ps = float(campos[1]) if len(campos) > 1 else 0.0
+                print(f"  {rep.name}: {ps/2000:.1f}% — {ps:.0f} ps de 200000 "
+                      f"(faltam ~{200 - ps/1000:.1f} ns)")
+            perf = [l for l in ls if l.startswith("Performance:")]
+            if perf:
+                print(f"      {perf[-1].strip()}   (o 1o numero e ns/dia)")
+        else:
+            print(f"  {rep.name}: iniciando")
+else:
+    print("\nnenhuma réplica iniciada — a MD está no preparo ou equilíbrio")
 """)
 
 code(r"""
-# O veredito, quando a MD terminar
+# Fase 8 — métricas e veredito, quando a MD terminar
 p = MD / "md_resultados.csv"
 if p.exists():
-    print(pd.read_csv(p).to_string(index=False))
+    res = pd.read_csv(p)
+    print("MÉTRICAS POR RÉPLICA")
+    print(res.to_string(index=False))
+    for col, corte, rot in (("rmsd_proteina_media", 3.5, "RMSD da proteína"),
+                            ("rmsd_protac_media", 5.0, "RMSD do PROTAC")):
+        if col in res:
+            m = res[col].mean()
+            print(f"  {rot}: média {m:.2f} Å  (corte {corte}) -> "
+                  f"{'OK' if m <= corte else 'FORA'}")
+else:
+    print("md_resultados.csv ausente — a MD ainda não terminou")
+
 p = MD / "md_veredito.json"
 if p.exists():
     print("\nVEREDITO")
     print(json.dumps(json.loads(p.read_text()), indent=2, ensure_ascii=False))
 else:
-    print("\n(veredito ainda não emitido — a MD está rodando)")
+    print("\n(veredito ainda não emitido)")
+    print("Reprovando: MD_RANK=2 em config/pipeline.conf e relançar —")
+    print("a fila da fase 7 já tem o próximo candidato, nada é recalculado.")
 """)
 
 # ===========================================================================
+# APÊNDICES
+# ===========================================================================
 md(r"""
 ---
-# Apêndice A — catálogo dos erros
+# Apêndice A — Catálogo dos erros
 
-Cada linha aqui é um erro que **não levantava exceção**, ou que levantava a
-exceção errada. Estão juntos de propósito: a lista é a parte transferível deste
-trabalho.
+Cada linha é um erro que **não levantava exceção**, ou que levantava a exceção
+errada, ou cuja mensagem apontava para o lugar errado. Estão juntos de
+propósito: esta lista é a parte transferível do trabalho.
+
+## Nas fases 1–7
 
 | # | Onde | Sintoma | Causa | Correção |
 |---|---|---|---|---|
@@ -950,49 +1176,223 @@ trabalho.
 | 11 | WP1 | conjugação no NH da glutarimida | ponto escolhido sem olhar o farmacóforo | lista `FARMACOFOROS` com exclusão |
 | 12 | WP3 | composto errado do catálogo | identificação por índice | InChIKey do esqueleto |
 | 13 | driver | `--dry-run` baixava arquivos e marcava fases | `DRY` não era respeitado | guardas em `mark_done` e nos downloads |
-| 14 | MD | "file does not exist" em cascata | guarda de retomada em `topol.top`, criado antes do fim | guardar pela saída final + `gmx_ok` |
-| 15 | MD | `Incomplete ring in HIS68` | cadeias laterais parciais no cristal | `fix_receptor_for_md.py` (15 → 0) |
-| 16 | MD | `Invalid order for directive atomtypes` | acpype junta as duas seções | `build_topology.py` separa e verifica |
-| 17 | MD | `make_ndx` falhava sempre | grupo é `UNL`, não `PTC`; números adivinhados | `build_index.py` descobre e verifica |
-| 18 | MD | `-update gpu` recusado | Nose-Hoover / posres não suportados | escada de offload em `mdrun_ok` |
-| 19 | MD | `make_ndx` "não listou grupos" | parser lido do log do genion; o make_ndx usa outro formato | os dois formatos |
-| 20 | MD | offload recusado tratado como erro de física | classificador procurava `not supported`, mensagem dizia `does not support` | redações extras + escada própria da minimização |
-| 21 | MD | `cudaErrorIllegalAddress` no NVT | ligações peptídicas falsas de até 1,4 nm nas lacunas do cristal | `split_chain_gaps.py` + verificação de `Long Bond` |
 
-O padrão que atravessa a lista: **API que devolve "não fiz nada" com o mesmo
-tipo de "fiz"**. `ReplaceSubstructs`, `GetBestRMS`, `MolFromMolFile` (que
-levanta `OSError` em vez de devolver `None`), o `pdb2gmx` que cria o arquivo
-antes de terminar. Em todos, a defesa foi a mesma: **verificar a saída, não
-confiar na chamada**.
+## Na fase 8 — a cadeia de dez obstáculos
 
-## Apêndice B — o que continua sendo julgamento humano
+| # | Sintoma | Causa | Correção |
+|---|---|---|---|
+| 14 | "file does not exist" em cascata | guarda de retomada em `topol.top`, que o `pdb2gmx` cria **antes** de terminar | guardar pela saída **final** + `gmx_ok` |
+| 15 | `Incomplete ring in HIS68` | 15 cadeias laterais parciais no cristal | `fix_receptor_for_md.py` (15 → 0) |
+| 16 | `Invalid order for directive atomtypes` | acpype junta `[atomtypes]` e `[moleculetype]` no mesmo arquivo | `build_topology.py` separa e **verifica** |
+| 17 | `make_ndx` falhava sempre | grupo é `UNL` (default do RDKit), não `PTC`; números adivinhados | `build_index.py` descobre e verifica |
+| 18 | `make_ndx` "não listou grupos" | parser aprendido no log do **genion**; o `make_ndx` usa outro formato | os dois formatos |
+| 19 | offload recusado tratado como erro de física | classificador procurava `not supported`, mensagem dizia `does not support` | redações extras + escada própria para a minimização |
+| 20 | `cudaErrorIllegalAddress` no NVT | **ligações peptídicas falsas** de até 1,4 nm nas lacunas do cristal | `split_chain_gaps.py` + verificação de `Long Bond` |
+| 21 | NVT estourava mesmo com a cadeia sã | minimização com vínculos e água rígida; NVT partindo a 310 K com Nose-Hoover e dt = 2 fs | `-DFLEXIBLE` + `em2` + equilíbrio em degraus com V-rescale |
+| 22 | `nstxout-compressed = 1e8` | reusei a função que converte **ns** em passos para um valor em **ps** | duas funções, com a unidade no nome |
+| 23 | réplica 2 falharia por `npt.cpt` ausente | `-t` exigido para um conteúdo que ia ser descartado | `-t` condicional + `npt.gro` recuperável de um `prod.tpr` |
+
+## O padrão
+
+Três coisas atravessam a lista.
+
+**API que devolve "não fiz nada" com o mesmo tipo de "fiz".**
+`ReplaceSubstructs`, `GetBestRMS`, `MolFromMolFile` (que levanta `OSError` em
+vez de devolver `None`), o `pdb2gmx` que cria o arquivo antes de terminar. Em
+todos, a defesa foi a mesma: **verificar a saída, não confiar na chamada.**
+
+**O sintoma raramente fica perto da causa.** `cudaErrorIllegalAddress` levaria
+a investigar driver, versão de CUDA e memória da placa. A causa era uma
+ligação peptídica de 1,4 nm criada quinze minutos antes, cujo aviso
+(`Long Bond`) estava na tela e foi lido como ruído. Hoje `explain_lincs.py`
+traduz os índices em nomes de resíduo, e o `md_run.sh` repete o bloco de erro
+no fim do log, onde quem roda `tail` o vê.
+
+**Escrever código contra a mensagem que se tem à mão, não contra a que a
+ferramenta produz.** Os obstáculos 18, 19 e 22 são meus, e todos dessa forma.
+Os stubs de teste do repositório hoje reproduzem as mensagens **literais** do
+GROMACS 2026.2 por isso.
+""")
+
+md(r"""
+---
+# Apêndice B — O que continua sendo julgamento humano
 
 O pipeline é automático de ponta a ponta, mas quatro coisas não foram — e não
-devem ser — automatizadas:
+devem ser — automatizadas.
 
-1. **Disparar os jobs do PRosettaC.** Rode **um** antes do lote e confira o
-   `Anchor atoms`: a convenção 0-based *vs* 1-based varia por build, e um lote
-   inteiro com o átomo errado é um lote perdido.
-2. **Submeter os JSONs do AlphaFold 3** em `alphafoldserver.com`.
-3. **Inspecionar as poses no ChimeraX** antes de comprometer dias de GPU.
-4. **Escolher os cortes.** `ANALISE_COS_MIN=0.3`, `DOCK_ROUND1_CUTOFF=-7.0`,
-   `ANALISE_SD_MAX=0.5` são decisões suas, não constantes da natureza. A tese
-   fica mais forte se aparecerem como decisões, com o efeito de afrouxá-las
-   registrado.
+**1. Disparar os jobs do PRosettaC.** Rode **um** antes do lote e confira o
+`Anchor atoms`: a convenção 0-based *vs* 1-based varia por build, e um lote
+inteiro com o átomo errado é um lote perdido.
 
-## Apêndice C — mapa dos arquivos
+**2. Submeter os JSONs do AlphaFold 3** em `alphafoldserver.com`.
+
+**3. Inspecionar as poses no ChimeraX** antes de comprometer dias de GPU. O
+pipeline verifica geometria e números; ele não olha.
+
+**4. Escolher os cortes.** `ANALISE_COS_MIN=0.3`, `DOCK_ROUND1_CUTOFF=-7.0`,
+`ANALISE_SD_MAX=0.5`, `MD_TRUNCAR_PERTO=0` são **decisões suas**, não
+constantes da natureza. A tese fica mais forte se aparecerem como decisões, com
+o efeito de afrouxá-las registrado.
+
+Some-se a isso o que é limitação **do método**, não do código, e que precisa
+constar:
+
+- O nível (ii) simula E3 + PROTAC. Ele **não** testa o complexo ternário com a
+  PCSK9 — essa é a etapa do PRosettaC/AF3, e ela depende de predição.
+- 200 ns é curto para reorganização de interface. Estabilidade em 200 ns é
+  evidência **necessária, não suficiente**.
+- GAFF2/AM1-BCC para um PROTAC de 19 torções é o padrão da área, mas é
+  parametrização genérica; a barreira torsional do linker é o ponto fraco.
+- 802,9 Da e 19 rotáveis: permeabilidade celular é o gargalo conhecido da
+  classe, e nada neste pipeline a mede.
+""")
+
+md(r"""
+---
+# Apêndice C — Mapa dos arquivos
+
+## Configuração e driver
 
 | Arquivo | Papel |
 |---|---|
 | `config/pipeline.conf` | **tudo** que muda de máquina ou de projeto |
 | `scripts/run_pipeline.sh` | driver das 8 fases, marcadores `.done_<n>`, `--from/--only/--list/--dry-run` |
-| `scripts/rmsd_inplace.py` | RMSD que mede sem superpor (a armadilha nº 2) |
-| `scripts/docking_engines.py` | Vina e Uni-Dock atrás da mesma assinatura |
-| `scripts/wp2_linker_tools.py` | filtros, geometria no exit vector, rótulos, montagem |
-| `scripts/build_topology.py` | ordem das diretivas do GROMACS |
-| `scripts/build_index.py` | grupos de acoplamento descobertos e verificados |
+| `scripts/status.sh` | onde o pipeline está, num comando |
 | `docs/RUNBOOK.md` | como rodar, fase por fase |
 | `docs/WP3_warheads_PCSK9.md` | a química das warheads |
+
+## Fases 1–7
+
+| Arquivo | Papel |
+|---|---|
+| `generate_pcsk9_warheads.py` | enumera as 180 warheads (`molzip`, átomo 0 = N de conjugação) |
+| `prep_pcsk9_receptor.py` | receptor, sítio, exit vector |
+| `docking_engines.py` | Vina e Uni-Dock atrás da mesma assinatura |
+| `dock_warheads_pcsk9.py` | portão de validação + triagem em duas rodadas |
+| `analyze_warhead_docking.py` | LE, viabilidade geométrica, estabilidade de pose |
+| `rmsd_inplace.py` | RMSD que mede **sem** superpor (a armadilha nº 2) |
+| `revalidate_redocking.py` | reconfere o portão do WP1 |
+| `wp1_select_recruiter.py` | E3, recrutador, exit point, guarda de farmacóforo |
+| `wp2_linker_tools.py` | filtros, geometria no exit vector, rótulos, montagem verificada |
+| `wp2_build_subcomplexes.py` | sub-complexos recrutador-linker |
+| `wp3_assemble_protacs.py` | PROTACs completos + entradas do PRosettaC |
+| `rank_protacs.py` | escore composto, fila da MD |
+
+## Fase 8
+
+| Arquivo | Papel |
+|---|---|
+| `md_prepare.py` | embebe o PROTAC com o recrutador travado na pose do docking |
+| `fix_receptor_for_md.py` | reconstrói cadeias laterais incompletas (ChimeraX) |
+| `split_chain_gaps.py` | corta a cadeia nas lacunas do cristal |
+| `build_topology.py` | ordem das diretivas que o GROMACS exige |
+| `build_index.py` | grupos de acoplamento descobertos e **verificados** |
+| `md_run.sh` | acpype → topologia → solvatação → equilíbrio em degraus → produção |
+| `explain_lincs.py` | traduz índices do LINCS em nomes de resíduo |
+| `md_analyze.py` | RMSD, contatos, veredito contra critérios explícitos |
+
+## Autotestes
+
+Módulos que rodam sozinhos e **demonstram** o defeito que corrigem:
+
+```bash
+python scripts/rmsd_inplace.py       # GetBestRMS dá 0,00 para pose a 25 Å
+python scripts/wp2_linker_tools.py   # filtro, montagem verificada, colocação
+```
+
+Todos os scripts são determinísticos (`--seed`, default `0xC0FFEE`). Para a
+tese, registre as linhas de comando exatas e as versões de RDKit e GROMACS.
+""")
+
+md(r"""
+---
+# Apêndice D — Parâmetros da metodologia, para a tese
+
+Tabela única com tudo que precisa ser declarado. Os valores vêm de
+`config/pipeline.conf` e dos scripts; a célula abaixo relê o `.conf` do disco
+para você conferir que nada divergiu.
+
+## Estruturas
+
+| Item | Valor |
+|---|---|
+| PCSK9 | **6U26**, cadeias A + B, ligante de referência `063` |
+| sítio | núcleo enterrado do `063`, centro `[38.589, 25.818, 26.443]`, caixa `[20.47, 18.46, 18.16]` Å |
+| exit vector (PCSK9) | `[0.222, 0.8162, 0.5333]` |
+| distância do sítio à interface EGF(A) do LDLR | **23,4 Å** |
+| E3 | **CRBN**, cristal **4TZ4**, cadeia C |
+| exit point (CRBN) | `[-41.719, 60.152, -86.692]`, direção `[0.3075, 0.8534, 0.4209]` |
+| bibliotecas | **Chemspace** linkers + anchors (Enamine excluído por decisão) |
+
+## Docking
+
+| Item | Valor |
+|---|---|
+| motor | Uni-Dock v1.2.0 (GPU, `--gpu_batch`), função de escore do AutoDock Vina |
+| portão de validação | redocking do núcleo do `063`, **RMSD 0,21 Å em 5/5 sementes** (critério ≤ 2,0 Å) |
+| rodada 1 | exaustividade baixa, 180 warheads, corte `-7,0` kcal/mol |
+| rodada 2 | exaustividade alta, 5 sementes |
+| critérios de viabilidade | `SD_MAX = 0,5` Å · `COS_MIN = 0,3` (escolhido sem base empírica) |
+
+## Dinâmica molecular
+
+| Item | Valor |
+|---|---|
+| campos de força | AMBER **ff14SB** (proteína) · **GAFF2/AM1-BCC** (PROTAC, acpype) |
+| água / caixa | **TIP3P**, cúbica, folga 1,3 nm |
+| neutralização | 5 CL⁻ (carga do sistema +5) |
+| eletrostática | PME, `rvdw = rcoulomb = 0,9` nm |
+| vínculos | LINCS em h-bonds, `order 8`, `iter 2` |
+| equilíbrio | `em` (emtol 1000, `-DFLEXIBLE`) → `em2` (emtol 100) → `warm` 20 ps @ 0,5 fs → `nvt` 100 ps @ 1 fs → `npt` 5 ns @ 2 fs, **V-rescale**, soluto restrito |
+| produção | **200 ns × 3 réplicas**, dt 2 fs, **Nose-Hoover** τ 1,0 ps @ 310 K, **Parrinello-Rahman** τ 2,0 ps @ 1 bar |
+| amostragem | 1000 frames por réplica (um a cada 200 ps) |
+| critérios de aprovação | RMSD CA ≤ 3,5 Å · RMSD PROTAC ≤ 5,0 Å · contatos do recrutador mantidos |
+| reparos no receptor | 15 cadeias laterais reconstruídas (→ 0 incompletas) · 4 quebras de cadeia nas lacunas, todas a > 16 Å do sítio |
+""")
+
+code(r"""
+# Apêndice D — o pipeline.conf como está no disco, para conferência
+conf = Path.home() / "Protac_env" / "config" / "pipeline.conf"
+if conf.exists():
+    interessa = (
+        "PCSK9_PDB", "PCSK9_CHAIN", "PCSK9_REF_LIGAND", "PCSK9_BURIAL",
+        "DOCK_ROUND1_CUTOFF", "DOCK_BATCH", "ANALISE_SD_MAX", "ANALISE_COS_MIN",
+        "N_WARHEADS_WP2", "LINKERS_SDF", "ANCHORS_SDF", "LINKERS_EXTRA",
+        "LINKER_NCONFS", "LINKER_NSPINS", "LINKER_ATOM_MIN", "LINKER_ATOM_MAX",
+        "LINKER_ROTB_MAX", "N_LINKERS_WP3", "MD_N_REPLICAS", "MD_NS_PROD",
+        "MD_NS_NPT", "MD_RANK", "MD_AUTO", "MD_TRUNCAR_PERTO",
+    )
+    for linha in conf.read_text().splitlines():
+        nome = linha.split("=")[0].strip()
+        if nome in interessa:
+            print("  " + linha.strip())
+else:
+    print(f"não achei {conf}")
+""")
+
+md(r"""
+---
+# Apêndice E — Glossário
+
+| Termo | O que é |
+|---|---|
+| **PROTAC** | molécula bifuncional que recruta uma ligase E3 para degradar uma proteína-alvo |
+| **warhead** | a ponta do PROTAC que liga na proteína-alvo (aqui, na PCSK9) |
+| **recrutador** | a ponta que liga na ligase E3 (aqui, na CRBN) |
+| **linker** | a ponte entre as duas, bifuncional por definição |
+| **complexo ternário** | alvo + PROTAC + E3 juntos; é ele que tem de ser produtivo |
+| **exit vector** | direção em que o solvente é acessível a partir de um sítio; por onde o linker sai |
+| **LE** (*ligand efficiency*) | −score dividido pelo número de átomos pesados; corrige o viés de tamanho |
+| **portão** | critério que interrompe o pipeline, em vez de filtrar moléculas |
+| **nível (ii)** | a MD de E3 + recrutador-linker-warhead, sem a proteína-alvo |
+| **ff14SB / GAFF2** | campos de força para proteína e para molécula pequena |
+| **AM1-BCC** | método de cargas parciais usado com o GAFF2 |
+| **PME** | *Particle Mesh Ewald*, tratamento da eletrostática de longo alcance |
+| **LINCS** | algoritmo que mantém os vínculos (aqui, as ligações com H) |
+| **V-rescale / Nose-Hoover** | termostatos; o primeiro é robusto, o segundo é correto no ensemble |
+| **Parrinello-Rahman** | barostato usado na produção |
+| **offload** | passar tarefas (não-ligadas, PME, ligadas, integração) para a GPU |
 """)
 
 # ===========================================================================
@@ -1011,5 +1411,7 @@ out = Path(__file__).resolve().parent.parent / "notebooks" / \
     "protac_pipeline_documentado.ipynb"
 out.write_text(json.dumps(nb, indent=1, ensure_ascii=False) + "\n")
 n_md = sum(1 for c in CELLS if c["cell_type"] == "markdown")
-print(f"{out}  ({len(CELLS)} células: {n_md} markdown, "
-      f"{len(CELLS) - n_md} código)")
+n_linhas = sum(len(c["source"]) for c in CELLS)
+print(f"{out}")
+print(f"  {len(CELLS)} células: {n_md} markdown, {len(CELLS) - n_md} código")
+print(f"  {n_linhas} linhas de conteúdo")
