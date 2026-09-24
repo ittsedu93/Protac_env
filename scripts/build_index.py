@@ -43,8 +43,18 @@ NAO_LIGANTE = {
     "water_and_ions", "other", "na", "cl", "k", "mg", "ca", "zn", "dna", "rna",
 }
 
-RE_GRUPO = re.compile(
-    r"^\s*(?:Group\s+)?(\d+)\s*\(\s*(\S+)\s*\)\s+has\s+(\d+)\s+elements", re.M)
+# O GROMACS lista grupos em DOIS formatos, e qual deles aparece depende da
+# ferramenta — não da versão. O genion e o grompp escrevem
+#     Group    13 (            UNL) has   105 elements
+# e o make_ndx escreve o seu próprio
+#      13 UNL                 :   105 atoms
+# Ler só um dos dois é o bastante para o parser não achar nada e o script
+# desistir de um sistema perfeitamente bom.
+RE_FORMATOS = (
+    re.compile(r"^\s*(?:Group\s+)?(\d+)\s*\(\s*(\S+)\s*\)\s+has\s+(\d+)\s+elements",
+               re.M),
+    re.compile(r"^\s*(\d+)\s+(\S+)\s*:\s*(\d+)\s+atoms", re.M),
+)
 
 
 def rodar_make_ndx(gro: Path, gmx: str, entrada: str, out: str):
@@ -57,9 +67,16 @@ def listar_grupos(gro: Path, gmx: str) -> dict[int, tuple[str, int]]:
     """Números, nomes e tamanhos dos grupos, lidos da saída do próprio gmx."""
     r = rodar_make_ndx(gro, gmx, "q\n", "/dev/null")
     saida = (r.stdout or "") + (r.stderr or "")
-    grupos = {int(n): (nome, int(tam)) for n, nome, tam in RE_GRUPO.findall(saida)}
+    grupos = {}
+    for rx in RE_FORMATOS:
+        for n, nome, tam in rx.findall(saida):
+            grupos[int(n)] = (nome, int(tam))
     if not grupos:
-        raise SystemExit(f"o make_ndx não listou grupos.\n{saida[-1500:]}")
+        raise SystemExit(
+            "o make_ndx não listou grupos em nenhum formato conhecido.\n"
+            "Saída completa abaixo — se houver uma lista de grupos aí, é o\n"
+            "parser que precisa aprender o formato, não o sistema que está mau.\n"
+            + "-" * 70 + f"\n{saida}\n" + "-" * 70)
     return grupos
 
 
