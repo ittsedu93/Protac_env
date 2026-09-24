@@ -8,11 +8,18 @@
 #   bash scripts/run_pipeline.sh --list         # o que já está feito
 #   bash scripts/run_pipeline.sh --dry-run      # imprime sem executar
 #
-# Para deixar rodando e desligar o notebook:
+# Para deixar rodando e desligar o notebook, SEM instalar nada:
+#   setsid bash ~/Protac_env/scripts/run_pipeline.sh > ~/pipeline.log 2>&1 &
+#   disown -a
+#   tail -f ~/pipeline.log       # Ctrl+C sai do tail, não do pipeline
+#
+# `setsid` cria uma sessão nova: o processo deixa de ser filho do terminal e
+# sobrevive ao fim da conexão SSH e ao fechamento do VS Code.
+#
+# Com tmux instalado (snap install tmux), a alternativa é:
 #   tmux new -s protac
 #   bash ~/Protac_env/scripts/run_pipeline.sh 2>&1 | tee ~/pipeline.log
-#   (Ctrl+B, depois D para soltar a sessão)
-#   tmux attach -t protac        # para voltar
+#   (Ctrl+B, depois D)  /  tmux attach -t protac para voltar
 #
 # Cada fase grava um marcador em $PIPELINE_OUT/.done_<n>. Fases já concluídas
 # são puladas, então relançar depois de uma queda custa só a fase interrompida.
@@ -224,8 +231,8 @@ if quer 5; then
       --linkers "$LINKERS_SDF" ${LINKERS_EXTRA:+--linkers-extra "$LINKERS_EXTRA"} \
       --recruiter "$E3_RECRUITER_SDF" \
       --receptor-pdb "$E3_RECEPTOR_PDB" \
-      --exit-point "$E3_EXIT_POINT" \
-      --exit-direction "$E3_EXIT_DIRECTION" \
+      "--exit-point=$E3_EXIT_POINT" \
+      "--exit-direction=$E3_EXIT_DIRECTION" \
       --n-confs "$LINKER_NCONFS" --n-spins "$LINKER_NSPINS" \
       --atom-range "$LINKER_ATOM_MIN" "$LINKER_ATOM_MAX" \
       --rotb-max "$LINKER_ROTB_MAX" \

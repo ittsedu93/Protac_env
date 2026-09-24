@@ -10,12 +10,17 @@ Um comando roda tudo, e você pode desligar o notebook:
 
 ```bash
 cd ~/Protac_env && git pull
-tmux new -s protac
-bash ~/Protac_env/scripts/run_pipeline.sh 2>&1 | tee ~/pipeline.log
-# Ctrl+B, depois D
+setsid bash ~/Protac_env/scripts/run_pipeline.sh > ~/pipeline.log 2>&1 &
+disown -a
+tail -f ~/pipeline.log      # Ctrl+C sai do tail, não do pipeline
 ```
 
-Voltar: `tmux attach -t protac`. Estado: `run_pipeline.sh --list`.
+`setsid` cria uma sessão nova: o processo deixa de ser filho do terminal e
+sobrevive ao fim do SSH. Não precisa instalar nada — o `tmux` não vem nesta
+workstation.
+
+Acompanhar depois: `tail -f ~/pipeline.log` · Estado: `run_pipeline.sh --list` ·
+Ainda vivo? `pgrep -af run_pipeline`.
 Retomar de uma fase: `run_pipeline.sh --from 5`.
 
 Toda a configuração fica em `config/pipeline.conf` — caminhos, envs, cortes.

@@ -45,6 +45,33 @@ RDLogger.DisableLog("rdApp.*")
 
 OBABEL_EXE = "/home/soberano/miniconda3/envs/obabel_env/bin/obabel"
 
+# Átomos que NÃO podem receber o linker: são o farmacóforo que ancora o
+# recrutador na E3 ligase. Conjugar neles destrói o recrutamento, e a
+# heurística geométrica não tem como saber disso — ela vê um átomo exposto com
+# hidrogênio e o escolhe.
+#
+# O caso que motivou esta lista: num análogo de talidomida o ÚNICO N com
+# hidrogênio é o NH da glutarimida, que faz as ligações de hidrogênio no bolsão
+# tri-triptofano da CRBN. A heurística o elegeu ponto de conjugação.
+FARMACOFOROS = [
+    ("NH da glutarimida (CRBN — bolsão tri-Trp)", "[NX3;H1;R](C(=O))C(=O)"),
+    ("N imídico (CRBN)",                          "[NX3;R](C(=O))C(=O)"),
+    ("hidroxila da hidroxiprolina (VHL)",         "[OX2;H1][CX4;R][CX4;R]"),
+    ("amida da terc-leucina (VHL)",               "[NX3;H1]C(=O)[CX4][CX4](C)(C)C"),
+]
+
+
+def atomos_farmacoforicos(mol):
+    """Índices que não devem receber o linker, com o motivo."""
+    proibidos = {}
+    for nome, smarts in FARMACOFOROS:
+        patt = Chem.MolFromSmarts(smarts)
+        if patt is None:
+            continue
+        for match in mol.GetSubstructMatches(patt):
+            proibidos.setdefault(match[0], nome)
+    return proibidos
+
 # nomes prováveis das colunas nos CSVs do WP1, em ordem de preferência
 COLS_ID = ("ligand_id", "ligand", "name", "id", "mol_id", "molecule")
 COLS_SCORE = ("best_score", "score", "affinity", "vina_score", "energy")
@@ -118,50 +145,79 @@ def carregar_mol(caminho: Path, tmp: Path):
     return None
 
 
-def identificar_no_catalogo(lig_id: str, mol, anchors_sdf: Path | None):
+def identificar_no_catalogo(lig_id: str, mol, anchors_sdf: Path | None,
+                            prep: Path | None = None):
     """Descobre QUAL composto do catálogo é o recrutador escolhido.
 
-    Sem isto o resultado é "ligand_042", que não serve para encomendar nada
-    nem para escrever na tese. O WP1 nomeou os ligantes por posição na
-    biblioteca (ligand_NNN), então NNN é o índice no SDF; a conferência por
-    contagem de átomos pesados garante que o índice não escorregou.
+    Sem isto o resultado é "ligand_042", que não serve para encomendar reagente
+    nem para escrever na tese.
+
+    A correspondência por POSIÇÃO no SDF não é confiável: o WP1 pode ter
+    filtrado a biblioteca antes de numerar, e foi o que aconteceu — o índice 87
+    do catálogo tem 22 átomos pesados contra 37 da pose de ligand_087. Então a
+    identificação é feita pela ESTRUTURA: lê-se o SDF preparado em
+    prep/ligands/<lig_id>.sdf e casa-se o InChIKey contra o catálogo.
     """
     if not anchors_sdf or not Path(anchors_sdf).exists():
         return {"catalogo": None}
+
+    from rdkit.Chem import inchi
+
+    # estrutura de referência: o SDF preparado é mais fiel que a pose,
+    # que passou por pdbqt e perdeu ordens de ligação
+    ref = None
+    if prep:
+        for cand in (Path(prep) / "ligands" / f"{lig_id}.sdf",
+                     Path(prep) / f"{lig_id}.sdf"):
+            if cand.exists():
+                ref = Chem.MolFromMolFile(str(cand), removeHs=True)
+                if ref is not None:
+                    break
+    if ref is None:
+        ref = mol
+
     try:
-        idx = int(str(lig_id).rsplit("_", 1)[-1])
-    except ValueError:
-        return {"catalogo": None, "catalogo_nota": "id não termina em número"}
+        chave_ref = inchi.MolToInchiKey(ref).split("-")[0]   # só o esqueleto
+    except Exception:
+        chave_ref = None
 
     supp = Chem.SDMolSupplier(str(anchors_sdf), removeHs=True)
-    if idx >= len(supp):
-        return {"catalogo": None,
-                "catalogo_nota": f"índice {idx} fora da biblioteca ({len(supp)})"}
-    cand = supp[idx]
-    if cand is None:
-        return {"catalogo": None, "catalogo_nota": f"molécula {idx} ilegível"}
+    achado, idx_achado = None, None
+    for i, cand in enumerate(supp):
+        if cand is None:
+            continue
+        if cand.GetNumHeavyAtoms() != ref.GetNumHeavyAtoms():
+            continue
+        try:
+            if chave_ref and inchi.MolToInchiKey(cand).split("-")[0] == chave_ref:
+                achado, idx_achado = cand, i
+                break
+        except Exception:
+            continue
 
-    props = {k: cand.GetProp(k) for k in cand.GetPropNames()}
-    nome = (cand.GetProp("_Name") if cand.HasProp("_Name") else "") or ""
-    for chave in ("IDNUMBER", "ID", "Catalog ID", "CSID", "Chemspace ID", "SMILES"):
-        if chave in props and not nome:
+    if achado is None:
+        return {"catalogo": None,
+                "catalogo_nota": (
+                    f"não achei {lig_id} no catálogo por estrutura "
+                    f"({ref.GetNumHeavyAtoms()} átomos pesados). A biblioteca "
+                    f"triada no WP1 pode não ser exatamente este SDF.")}
+
+    props = {k: achado.GetProp(k) for k in achado.GetPropNames()}
+    nome = (achado.GetProp("_Name") if achado.HasProp("_Name") else "") or ""
+    for chave in ("IDNUMBER", "ID", "Catalog ID", "CSID", "Chemspace ID"):
+        if not nome and chave in props:
             nome = props[chave]
 
-    bate = cand.GetNumHeavyAtoms() == mol.GetNumHeavyAtoms()
     return {
         "catalogo": {
-            "indice_no_sdf": idx,
-            "nome": nome or f"(sem nome, índice {idx})",
-            "smiles": Chem.MolToSmiles(cand),
-            "n_heavy_catalogo": cand.GetNumHeavyAtoms(),
-            "n_heavy_pose": mol.GetNumHeavyAtoms(),
-            "confere": bool(bate),
+            "indice_no_sdf": idx_achado,
+            "nome": nome or f"(sem nome, índice {idx_achado})",
+            "smiles": Chem.MolToSmiles(achado),
+            "n_heavy": achado.GetNumHeavyAtoms(),
+            "casado_por": "InChIKey do esqueleto",
             "propriedades": {k: v for k, v in list(props.items())[:10]},
         },
-        "catalogo_nota": ("" if bate else
-                          "ATENÇÃO: contagem de átomos pesados difere entre a "
-                          "pose e a molécula do catálogo nesse índice — a "
-                          "correspondência por posição pode estar errada"),
+        "catalogo_nota": "",
     }
 
 
@@ -213,11 +269,21 @@ def exit_vector_do_recrutador(mol, rec_xyz: np.ndarray, burial: int = 20,
     direcao = v / n
 
     # ponto de conjugação: entre os átomos expostos COM hidrogênio para ceder,
-    # o mais afastado do núcleo ancorado
+    # o mais afastado do núcleo ancorado — excluindo o farmacóforo
+    proibidos = atomos_farmacoforicos(mol)
     candidatos = [int(i) for i in np.where(expostos)[0]
                   if mol.GetAtomWithIdx(int(i)).GetTotalNumHs() > 0]
+    excluidos = [(i, proibidos[i]) for i in candidatos if i in proibidos]
+    candidatos = [i for i in candidatos if i not in proibidos]
+
     if not candidatos:
-        candidatos = [int(i) for i in np.where(expostos)[0]]
+        livres = [int(i) for i in np.where(expostos)[0] if int(i) not in proibidos]
+        if not livres:
+            raise SystemExit(
+                "todos os átomos expostos fazem parte do farmacóforo: este "
+                "recrutador não tem vetor de saída utilizável sem destruir o "
+                "reconhecimento pela E3 ligase")
+        candidatos = livres
     idx = max(candidatos, key=lambda i: float(np.linalg.norm(pos[i] - centro_nucleo)))
 
     atomo = mol.GetAtomWithIdx(int(idx))
@@ -232,6 +298,8 @@ def exit_vector_do_recrutador(mol, rec_xyz: np.ndarray, burial: int = 20,
         "n_atomos_enterrados": int(enterrados.sum()),
         "n_atomos_expostos": int(expostos.sum()),
         "burial_min_max": [int(nb.min()), int(nb.max())],
+        "excluidos_por_farmacoforo": [{"atom_idx": i, "motivo": m}
+                                      for i, m in excluidos],
     }
 
 
@@ -307,6 +375,8 @@ def main():
             print(f"  [{lig_id}] score {score:.2f} | conjugação pelo átomo "
                   f"{ev['atom_idx']} ({ev['atom_symbol']}, {ev['atom_n_hs']} H) "
                   f"a {ev['dist_ao_nucleo_A']} Å do núcleo")
+            for ex in ev.get("excluidos_por_farmacoforo", []):
+                print(f"      [protegido] átomo {ex['atom_idx']}: {ex['motivo']}")
 
             if e3 in resultados:
                 continue                       # guarda só o melhor por E3
@@ -324,12 +394,11 @@ def main():
                 f"# confira se ele aponta para o solvente e se é um ponto de\n"
                 f"# acoplamento quimicamente razoável\n")
 
-            cat = identificar_no_catalogo(lig_id, mol, args.anchors_sdf)
+            cat = identificar_no_catalogo(lig_id, mol, args.anchors_sdf, prep)
             if cat.get("catalogo"):
                 c = cat["catalogo"]
-                print(f"      catálogo: {c['nome']}  "
-                      f"({'confere' if c['confere'] else 'NÃO CONFERE'}: "
-                      f"{c['n_heavy_pose']} vs {c['n_heavy_catalogo']} átomos)")
+                print(f"      catálogo: {c['nome']} (índice {c['indice_no_sdf']}, "
+                      f"casado por {c['casado_por']})")
             if cat.get("catalogo_nota"):
                 print(f"      {cat['catalogo_nota']}")
 
