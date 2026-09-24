@@ -672,7 +672,46 @@ letras (`d`/`c`/`h`/`p`), e passar `highest` dá `Unknown criteria: 'i'` — a
 mensagem cita a segunda letra, o que torna o erro mais difícil de ler do que
 precisava.
 
-### 2. `[ atomtypes ]` depois de `[ moleculetype ]`
+### 2. Ligações peptídicas que não existem
+
+O `pdb2gmx` avisou, e o aviso passou batido:
+
+```
+Long Bond (1247-1249 = 0.558481 nm)
+Long Bond (3358-3360 = 1.39835 nm)
+```
+
+Uma ligação peptídica mede **0,133 nm**. Essas medem de 0,56 a 1,40 nm. O
+cristal 4TZ4 da CRBN tem alças não resolvidas, e o `pdb2gmx`, vendo uma cadeia
+contínua no arquivo, criou ligações entre os resíduos que **ladeiam** cada
+lacuna — resíduos que estão a nanômetros de distância. Os índices diferem de 2,
+que é o padrão de `C(i)–N(i+1)` com o `O` no meio: são ligações peptídicas
+falsas.
+
+Uma mola harmônica esticada dez vezes tem energia para desmontar o sistema. E o
+sintoma **não se parece com a causa**:
+
+```
+Step 5  LINCS WARNING ... 539 540   0.9983  863453.1250   0.1090
+CUDA error #700 (cudaErrorIllegalAddress): an illegal memory access
+```
+
+O erro de CUDA é consequência de a placa tocar coordenadas que viraram lixo —
+na CPU o mesmo sistema estouraria com outra mensagem. Quem persegue o erro de
+CUDA procura driver, versão, memória da GPU; nada disso tem a ver.
+
+`split_chain_gaps.py` mede o `C–N` de cada par consecutivo e insere `TER` onde
+a distância passa de 2,5 Å. O `pdb2gmx` então trata cada segmento como cadeia
+própria, e a carga total não muda: cada corte soma um NH3+ (+1) e um COO- (−1).
+O script também avisa quando uma lacuna cai a menos de 12 Å do ligante — ali os
+términos carregados ficam perto do sítio, e o certo passa a ser modelar a alça
+em vez de cortá-la.
+
+Depois disso, o `md_run.sh` **verifica**: sobrando qualquer `Long Bond` no log
+do `pdb2gmx`, ele para, porque uma ligação longa aqui vira estouro dez minutos
+adiante e o erro de então não aponta para cá.
+
+### 3. `[ atomtypes ]` depois de `[ moleculetype ]`
 
 O `.itp` do acpype traz as duas seções no mesmo arquivo. O GROMACS exige que
 **todo** `[ atomtypes ]` venha antes da primeira molécula, e o `topol.top` do
@@ -691,7 +730,7 @@ Meta-erro divertido: meu próprio verificador reprovou meu próprio comentário,
 porque ele continha o texto `[ moleculetype ]`. O GROMACS ignora tudo depois de
 `;`, e o verificador passou a ignorar também.
 
-### 3. A retomada guardava o arquivo errado
+### 4. A retomada guardava o arquivo errado
 
 `md_run.sh` pulava o `pdb2gmx` se `topol.top` existisse. Mas o `pdb2gmx` **cria**
 o `topol.top` antes de terminar: uma execução que morreu no meio (a do HIS68)
@@ -703,7 +742,7 @@ Duas correções: a guarda passou a olhar a saída **final** de cada etapa
 (`complexo.gro`), e todo comando passa por `gmx_ok`, que confere o código de
 saída **e** a existência do arquivo esperado.
 
-### 4. O `make_ndx` que nunca poderia funcionar
+### 5. O `make_ndx` que nunca poderia funcionar
 
 Os `tc-grps` dos `.mdp` precisam nomear grupos que existam no índice. A versão
 escrita à mão adivinhava os números (`1 | 13`, `name 22 Protein_PTC`) e supunha
@@ -733,7 +772,7 @@ Dois cuidados a mais: os nomes dos grupos passaram a ser fixos
 resíduo; e um `Water_and_ions` que o GROMACS já tenha criado é **reaproveitado**
 em vez de duplicado, para o `grompp` não ter de escolher entre homônimos.
 
-### 5. O nome do resíduo, resolvido nas duas pontas
+### 6. O nome do resíduo, resolvido nas duas pontas
 
 `md_prepare.py` agora batiza o resíduo como `PTC` na única vez em que as
 coordenadas são escritas, e `md_analyze.py` **descobre** o nome na trajetória
@@ -742,7 +781,7 @@ PROTAC). A primeira correção conserta o futuro; a segunda faz a análise
 funcionar no sistema que já está parametrizado como `UNL`, sem refazer os 27
 minutos de acpype.
 
-### 6. O offload total da GPU nem sempre é aceito
+### 7. O offload total da GPU nem sempre é aceito
 
 `-nb gpu -pme gpu -bonded gpu -update gpu` é o ideal numa Blackwell de 32 GB,
 onde o sistema inteiro (111.809 átomos) cabe na placa. Mas o GROMACS **recusa**
@@ -756,7 +795,7 @@ sobre offload. Um erro de física (LINCS, explosão) falha de uma vez, porque
 repetir três vezes uma simulação que vai estourar de novo custaria horas por
 nada.
 
-### 7. Retomada de verdade na produção
+### 8. Retomada de verdade na produção
 
 200 ns × 3 réplicas é medido em dias. Havendo checkpoint, o `mdrun` retoma com
 `-cpi` em vez de recomeçar. Sem isso, uma queda na 190ª nanosegundo custaria a
@@ -850,6 +889,9 @@ trabalho.
 | 16 | MD | `Invalid order for directive atomtypes` | acpype junta as duas seções | `build_topology.py` separa e verifica |
 | 17 | MD | `make_ndx` falhava sempre | grupo é `UNL`, não `PTC`; números adivinhados | `build_index.py` descobre e verifica |
 | 18 | MD | `-update gpu` recusado | Nose-Hoover / posres não suportados | escada de offload em `mdrun_ok` |
+| 19 | MD | `make_ndx` "não listou grupos" | parser lido do log do genion; o make_ndx usa outro formato | os dois formatos |
+| 20 | MD | offload recusado tratado como erro de física | classificador procurava `not supported`, mensagem dizia `does not support` | redações extras + escada própria da minimização |
+| 21 | MD | `cudaErrorIllegalAddress` no NVT | ligações peptídicas falsas de até 1,4 nm nas lacunas do cristal | `split_chain_gaps.py` + verificação de `Long Bond` |
 
 O padrão que atravessa a lista: **API que devolve "não fiz nada" com o mesmo
 tipo de "fiz"**. `ReplaceSubstructs`, `GetBestRMS`, `MolFromMolFile` (que

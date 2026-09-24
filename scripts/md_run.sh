@@ -92,9 +92,46 @@ if [[ ! -s complexo.gro ]]; then
   fi
   RECEPTOR="$REC_FIX"
 
+  # Cristais têm alças não resolvidas. O pdb2gmx, vendo uma cadeia contínua,
+  # liga os resíduos que LADEIAM a lacuna — uma ligação peptídica de 1,4 nm
+  # onde cabem 0,133. A mola desmonta o sistema nos primeiros passos da
+  # dinâmica, e o sintoma não parece com a causa: LINCS WARNING seguido de
+  # cudaErrorIllegalAddress, porque a CUDA tocou em coordenadas que viraram
+  # lixo. Cortar a cadeia nas lacunas resolve na raiz.
+  REC_CAP="$MD_DIR/receptor_capped.pdb"
+  if [[ ! -f "$REC_CAP" ]]; then
+    echo -e "\n[2/6] cortando a cadeia nas lacunas do cristal"
+    python "$(dirname "$0")/split_chain_gaps.py" --receptor "$RECEPTOR" \
+        --ligante "$MD_DIR/protac.sdf" --out "$REC_CAP" || {
+      echo "*** não consegui cortar as lacunas da cadeia"; exit 1; }
+  fi
+  RECEPTOR="$REC_CAP"
+
   echo -e "\n[2/6] pdb2gmx — AMBER ff14SB + TIP3P"
-  gmx_ok proteina.gro "$GMX" pdb2gmx -f "$RECEPTOR" -ff amber14sb \
-      -water tip3p -o proteina.gro -p topol.top -i posre_prot.itp -ignh
+  "$GMX" pdb2gmx -f "$RECEPTOR" -ff amber14sb -water tip3p \
+      -o proteina.gro -p topol.top -i posre_prot.itp -ignh \
+      > pdb2gmx.log 2>&1
+  cat pdb2gmx.log
+  [[ -s proteina.gro ]] && [[ -s topol.top ]] || {
+    echo "*** pdb2gmx não produziu proteina.gro/topol.top"; exit 1; }
+
+  # Verificação, não confiança: uma ligação longa que sobre AQUI vira estouro
+  # dez minutos depois, e o erro que aparece então não aponta para cá.
+  if grep -q "Long Bond" pdb2gmx.log; then
+    echo "*** o pdb2gmx ainda criou ligações longas:"
+    grep "Long Bond" pdb2gmx.log | sed 's/^/      /'
+    echo "*** Uma ligação peptídica mede 0,133 nm. Qualquer coisa acima de"
+    echo "*** 0,25 nm é uma ligação que não existe, e ela VAI estourar a MD."
+    if [[ "${MD_ACEITA_LIGACOES_LONGAS:-0}" == "1" ]]; then
+      echo "*** MD_ACEITA_LIGACOES_LONGAS=1 — seguindo mesmo assim, por sua"
+      echo "*** conta. Isto fica registrado no log para constar na tese."
+    else
+      echo "*** Para seguir de propósito: MD_ACEITA_LIGACOES_LONGAS=1"
+      exit 1
+    fi
+  else
+    echo "      nenhuma ligação longa — a cadeia está sã"
+  fi
 
   # O .itp do acpype traz [ atomtypes ] e [ moleculetype ] juntos, e o
   # GROMACS exige todo atomtypes antes da primeira molécula. build_topology.py
@@ -263,6 +300,21 @@ etapa() {  # etapa <nome> <mdp> <gro_entrada> [extra_grompp]
 echo -e "\n[5/6] minimização e equilíbrio"
 ESCADA=("${ESCADA_EM[@]}")
 etapa em  em.mdp  neutro.gro || { echo "*** minimização falhou"; exit 1; }
+
+# A minimização "termina" mesmo num sistema tenso. O Fmax final é o que
+# distingue relaxou de desistiu — entrar no NVT com Fmax na casa de 1e4
+# kJ/mol/nm é entrar num estouro, e o estouro custa minutos de GPU para dizer
+# o que esta linha diz em um segundo.
+if [[ -f em.log ]]; then
+  fmax=$(awk '/Maximum force/ {print $4; exit}' em.log)
+  conv=""; grep -q "converged to Fmax" em.log && conv=" (convergiu)"
+  echo "      minimização: Fmax = ${fmax:-?} kJ/mol/nm${conv}"
+  if [[ -n "${fmax:-}" ]] && awk -v f="$fmax" 'BEGIN{exit !(f>5000)}'; then
+    echo "      [ATENÇÃO] Fmax alto: o sistema segue tenso. Se o NVT estourar,"
+    echo "      [ATENÇÃO] o problema é a geometria de partida, não o NVT."
+  fi
+fi
+
 ESCADA=("${ESCADA_MD[@]}")
 etapa nvt nvt.mdp em.gro -r em.gro || { echo "*** NVT falhou"; exit 1; }
 etapa npt npt.mdp nvt.gro -r nvt.gro -t nvt.cpt || { echo "*** NPT falhou"; exit 1; }
