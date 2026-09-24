@@ -46,8 +46,12 @@ WARHEAD_ISOTOPE = 2       # [2*] — ponta que vai no warhead    (WP3)
 # 1. Pontos de conjugação
 # ---------------------------------------------------------------------------
 # (nome, SMARTS, índice do átomo âncora dentro do match)
+# `!$(N[!#6;!#1])` e não `!$(N[!#6])`: a intenção é excluir N ligado a
+# heteroátomo (N-O, N-S), mas sem o `!#1` o padrão também exclui o próprio N-H
+# quando o SDF traz hidrogênios explícitos — e catálogos comerciais costumam
+# trazer. Isso descartava em silêncio TODO linker de amina terminal.
 ATTACHMENT_PATTERNS = [
-    ("amina_primaria",   "[NX3;H2;!$(N[!#6])][CX4]",      0),
+    ("amina_primaria",   "[NX3;H2;!$(N[!#6;!#1])][CX4]",  0),
     ("hidroxila",        "[OX2;H1][CX4]",                 0),
     ("acido_carboxilico", "[CX3](=[OX1])[OX2;H1]",        0),
     ("azida",            "[NX1-0]=[NX2+1]=[NX1-1]",       2),
