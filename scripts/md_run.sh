@@ -40,6 +40,11 @@ RESNAME=$(jq_ resname); LIG_PDB=$(jq_ lig_pdb); RECEPTOR=$(jq_ receptor_pdb)
 
 # parâmetros da metodologia
 TEMP=310; PRESSAO=1.0; DT=0.002
+# Nomes dos grupos de acoplamento térmico. Fixos de propósito: NÃO derivam do
+# nome do resíduo, porque o resíduo escrito nas coordenadas ($RESNAME para o
+# acpype, mas UNL no .gro) não é confiável. O build_index.py garante que
+# grupos com estes nomes existam, qualquer que seja o nome do ligante.
+GRP_SOLUTOS="Protein_LIG"; GRP_SOLVENTE="Water_and_ions"
 NS_PROD="${NS_PROD:-200}"; NS_NPT="${NS_NPT:-5}"; NS_NVT="${NS_NVT:-0.1}"
 BOX_NM=1.3; RC=0.9
 SAVE_PS=200
@@ -140,7 +145,7 @@ rcoulomb = $RC
 constraints = h-bonds
 constraint-algorithm = LINCS"
 acopl="tcoupl = Nose-Hoover
-tc-grps = Protein_${RESNAME} Water_and_ions
+tc-grps = ${GRP_SOLUTOS} ${GRP_SOLVENTE}
 tau-t = 1.0 1.0
 ref-t = $TEMP $TEMP"
 pacopl="pcoupl = Parrinello-Rahman
@@ -158,33 +163,74 @@ printf "integrator = md\ndt = %s\nnsteps = %d\n%s\n%s\n%s\ngen-vel = no\nnstxout
     "$DT" "$(python3 -c "print(int($NS_PROD*1000/$DT))")" "$comum" "$acopl" "$pacopl" \
     "$(python3 -c "print(int($SAVE_PS/$DT))")" "$(python3 -c "print(int($SAVE_PS/$DT))")" > prod.mdp
 
-# grupos de acoplamento: proteína+ligante contra água+íons
-if [[ ! -f grupos.ndx ]]; then
-  printf "1 | 13\nname 22 Protein_%s\n14 | 15\nname 23 Water_and_ions\nq\n" "$RESNAME" \
-    | "$GMX" make_ndx -f neutro.gro -o grupos.ndx > make_ndx.log 2>&1 || true
-  if ! grep -q "Protein_${RESNAME}" grupos.ndx 2>/dev/null; then
-    echo "      os índices padrão não serviram; montando pelos nomes"
-    printf "\"Protein\" | \"%s\"\nname 0 Protein_%s\n\"Water\" | \"Ion\"\nname 0 Water_and_ions\nq\n" \
-        "$RESNAME" "$RESNAME" | "$GMX" make_ndx -f neutro.gro -o grupos.ndx \
-        >> make_ndx.log 2>&1 || true
-  fi
-  if ! grep -q "Protein_${RESNAME}" grupos.ndx 2>/dev/null; then
+# Grupos de acoplamento: proteína+ligante contra água+íons.
+#
+# Não se escreve isto à mão. Os números dos grupos mudam com a composição do
+# sistema e o nome do resíduo do ligante não é o que se pediu ao acpype — era
+# assim que a versão anterior falhava, procurando um `Protein_PTC` que o
+# make_ndx nunca criaria porque o grupo se chamava `UNL`. O build_index.py
+# descobre os números pelos nomes, monta as fusões e confere o resultado.
+# Um grupos.ndx que ficou pela metade numa tentativa anterior é pior que
+# nenhum: ele existe, a retomada o aceita, e o grompp morre lá na frente
+# reclamando de tc-grps. A guarda confere o conteúdo, não só a existência.
+if [[ -s grupos.ndx ]] && \
+   ! { grep -q "\[ ${GRP_SOLUTOS} \]" grupos.ndx && \
+       grep -q "\[ ${GRP_SOLVENTE} \]" grupos.ndx; }; then
+  echo "      grupos.ndx incompleto (sem ${GRP_SOLUTOS}/${GRP_SOLVENTE}) — refazendo"
+  rm -f grupos.ndx
+fi
+if [[ ! -s grupos.ndx ]]; then
+  echo "      montando grupos de acoplamento"
+  python "$(dirname "$0")/build_index.py" --gro neutro.gro --out grupos.ndx \
+      --gmx "$GMX" --nome-solutos "$GRP_SOLUTOS" \
+      --nome-solvente "$GRP_SOLVENTE" || {
     echo "*** não consegui montar os grupos de acoplamento."
-    echo "*** Rode à mão e salve como grupos.ndx:"
+    echo "*** Rode à mão, crie ${GRP_SOLUTOS} e ${GRP_SOLVENTE}, salve como grupos.ndx:"
     echo "***   $GMX make_ndx -f neutro.gro -o grupos.ndx"
-    echo "*** Precisa existir um grupo Protein_${RESNAME} e um Water_and_ions."
-    exit 1
-  fi
+    exit 1; }
+else
+  echo "      grupos.ndx — já feito, pulando"
 fi
 
 # --- 5. minimização e equilíbrio ------------------------------------------
+# Escada de offload. O ideal é a GPU fazer tudo, mas parte das combinações da
+# metodologia o GROMACS recusa em `-update gpu` (o termostato Nose-Hoover e as
+# restrições de posição do equilíbrio são os casos conhecidos), e a recusa é um
+# erro de configuração que mata a etapa em segundos. Em vez de escolher de
+# antemão, tenta-se do mais rápido para o mais conservador — e só se a mensagem
+# do próprio GROMACS for sobre offload. Um erro de física (LINCS, explosão)
+# falha de uma vez, sem repetir horas de simulação.
 GPU="-nb gpu -pme gpu -bonded gpu -update gpu"
+GPU_MENOS="-nb gpu -pme gpu"
+
+mdrun_ok() {  # mdrun_ok <deffnm>
+  local nome="$1"; shift
+  local log="mdrun_${nome}.out" extra
+  local flags
+  for flags in "$GPU" "$GPU_MENOS" " "; do
+    # retomada: havendo checkpoint, continua de onde parou em vez de reiniciar
+    extra=""
+    [[ -f "${nome}.cpt" ]] && extra="-cpi ${nome}.cpt -append"
+    echo "      mdrun $nome ${extra:+(retomando) }[offload:${flags# }]"
+    if "$GMX" mdrun -deffnm "$nome" $extra $flags "$@" 2>&1 | tee "$log"; then
+      return 0
+    fi
+    if grep -qiE "not satisfied|not supported|cannot be used|incompatible" "$log"; then
+      echo "      o GROMACS recusou este offload — tentando com menos GPU"
+      continue
+    fi
+    echo "      mdrun falhou por motivo que não é offload; veja $log"
+    return 1
+  done
+  return 1
+}
+
 etapa() {  # etapa <nome> <mdp> <gro_entrada> [extra_grompp]
   local nome="$1" mdp="$2" entrada="$3"; shift 3
   if [[ -f "${nome}.gro" ]]; then echo "      $nome — já feito"; return 0; fi
   "$GMX" grompp -f "$mdp" -c "$entrada" -p topol.top -n grupos.ndx \
       -o "${nome}.tpr" -maxwarn 5 "$@" || return 1
-  "$GMX" mdrun -deffnm "$nome" $GPU || return 1
+  mdrun_ok "$nome" || return 1
 }
 
 echo -e "\n[5/6] minimização e equilíbrio"
@@ -202,7 +248,7 @@ for i in $(seq 1 "$N_REP"); do
   sed "s/^gen-vel = no/gen-vel = yes\ngen-seed = $seed\ngen-temp = $TEMP/" prod.mdp > "$rep/prod.mdp"
   "$GMX" grompp -f "$rep/prod.mdp" -c npt.gro -t npt.cpt -p topol.top \
       -n grupos.ndx -o "$rep/prod.tpr" -maxwarn 5 || exit 1
-  ( cd "$rep" && "$GMX" mdrun -deffnm prod $GPU ) || exit 1
+  ( cd "$rep" && mdrun_ok prod ) || exit 1
   echo "      $rep concluída"
 done
 

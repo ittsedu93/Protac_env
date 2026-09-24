@@ -95,6 +95,26 @@ def embutir_com_recrutador_fixo(protac_smiles: str, recruiter,
     return melhor, melhor_e, desvio, len(match)
 
 
+def nomear_residuo(mol, resname: str):
+    """Batiza o resíduo do ligante no PDB.
+
+    Sem isto o RDKit escreve `UNL`, o acpype propaga `UNL` para o .gro, e o
+    nome viaja até o fim do pipeline: o make_ndx cria um grupo `UNL` em vez do
+    esperado, e a análise procura `resname PTC` na trajetória e não acha nada.
+    Batizar aqui, na única vez que as coordenadas são escritas, resolve nos
+    dois lugares.
+    """
+    for i, atom in enumerate(mol.GetAtoms()):
+        info = Chem.AtomPDBResidueInfo()
+        info.SetResidueName(f"{resname:>3s}")
+        info.SetResidueNumber(1)
+        info.SetChainId("X")
+        info.SetName(f" {atom.GetSymbol()}{i}"[:4].ljust(4))
+        info.SetIsHeteroAtom(True)
+        atom.SetMonomerInfo(info)
+    return mol
+
+
 def escrever_complexo(receptor_pdb: Path, ligante, out_pdb: Path,
                       resname: str = LIG_RESNAME):
     """Receptor + ligante num único PDB, o ligante como HETATM."""
@@ -157,6 +177,7 @@ def main():
     with Chem.SDWriter(str(lig_sdf)) as w:
         w.write(mol)
     lig_pdb = out / "protac.pdb"
+    nomear_residuo(mol, LIG_RESNAME)
     Chem.MolToPDBFile(mol, str(lig_pdb))
 
     print("[3/4] Escrevendo o complexo E3 + PROTAC")

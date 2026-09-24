@@ -49,6 +49,33 @@ def carregar(md_dir: Path, rep: str):
     return mda.Universe(str(tpr), str(xtc))
 
 
+def descobrir_resname(u, pedido: str) -> str:
+    """Nome do resíduo do ligante, conferido contra a trajetória.
+
+    O nome escrito nas coordenadas nem sempre é o que o md_sistema.json diz:
+    o acpype batiza a moleculetype como se pede em `-b`, mas propaga para o
+    .gro o resíduo que veio do PDB de entrada (`UNL`, o default do RDKit).
+    Em vez de parar por causa disso, acha o resíduo que sobra depois de tirar
+    proteína, água e íons — que é o PROTAC, qualquer que seja seu nome.
+    """
+    if len(u.select_atoms(f"resname {pedido}")) > 0:
+        return pedido
+    resto = u.select_atoms(
+        "not protein and not resname SOL WAT HOH TIP3 NA CL K MG CA ZN")
+    nomes = sorted({r.resname for r in resto.residues})
+    if len(nomes) == 1:
+        print(f"      resíduo do ligante é '{nomes[0]}', não '{pedido}' "
+              f"(nome herdado do PDB de entrada) — seguindo com ele")
+        return nomes[0]
+    if not nomes:
+        raise SystemExit(
+            f"não achei o ligante na trajetória: nem '{pedido}' nem nenhum "
+            f"resíduo fora de proteína, água e íons")
+    raise SystemExit(
+        f"'{pedido}' não está na trajetória e há mais de um candidato a "
+        f"ligante: {nomes}. Rode com --resname <nome>.")
+
+
 def analisar_replica(u, resname: str):
     from MDAnalysis.analysis import rms
     from MDAnalysis.analysis.distances import distance_array
@@ -122,6 +149,7 @@ def main():
         if u is None:
             print(f"  [{rep}] trajetória incompleta, pulada")
             continue
+        resname = descobrir_resname(u, resname)
         r = analisar_replica(u, resname)
         series[rep] = r.pop("_series")
         r["replica"] = rep
