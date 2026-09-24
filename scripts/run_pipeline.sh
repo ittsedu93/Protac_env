@@ -45,7 +45,7 @@ log()  { echo -e "$*" | tee -a "$LOG"; }
 head_() { log "\n$(printf '=%.0s' {1..70})"; log "FASE $1 — $2"; log "$(printf '=%.0s' {1..70})"; }
 done_marker() { echo "$PIPELINE_OUT/.done_$1"; }
 is_done() { [[ -f "$(done_marker "$1")" ]]; }
-mark_done() { date -Is > "$(done_marker "$1")"; }
+mark_done() { [[ $DRY -eq 1 ]] && return 0; date -Is > "$(done_marker "$1")"; }
 
 # roda um comando num env conda, com log e parada em erro
 run_in() {
@@ -105,12 +105,17 @@ fi
 if quer 2; then
   head_ 2 "Ancorar os warheads na PCSK9 (horas, GPU)"
 
-  [[ -f "$PCSK9_PDB" ]] || {
-    log "baixando o cristal da PCSK9"
-    mkdir -p "$STRUCTURES"
-    wget -q -O "$PCSK9_PDB" "https://files.rcsb.org/download/$(basename "${PCSK9_PDB%.pdb}").pdb" \
-      || { log "*** falha ao baixar $PCSK9_PDB"; exit 1; }
-  }
+  if [[ ! -f "$PCSK9_PDB" ]]; then
+    if [[ $DRY -eq 1 ]]; then
+      log "[dry-run] baixaria $PCSK9_PDB do RCSB"
+    else
+      log "baixando o cristal da PCSK9"
+      mkdir -p "$STRUCTURES"
+      wget -q -O "$PCSK9_PDB" \
+        "https://files.rcsb.org/download/$(basename "${PCSK9_PDB%.pdb}").pdb" \
+        || { log "*** falha ao baixar $PCSK9_PDB"; exit 1; }
+    fi
+  fi
 
   run_in "$ENV_PFVS" bash "$WARHEADS_DIR/prepare_pdbqt.sh"
 
