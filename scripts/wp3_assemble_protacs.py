@@ -172,21 +172,36 @@ def main():
                 tmpl = Chem.MolFromMolFile(
                     str(Path(args.warheads_sdf).expanduser() / f"{r.warhead_id}.sdf"))
                 posed = Chem.MolFromMolFile(str(head_b))
-                if (tmpl is not None and posed is not None
-                        and tmpl.GetNumAtoms() == posed.GetNumAtoms()
-                        and [a.GetSymbol() for a in tmpl.GetAtoms()]
-                            == [a.GetSymbol() for a in posed.GetAtoms()]):
-                    alvo = Chem.Mol(tmpl)
-                    conf = Chem.Conformer(alvo.GetNumAtoms())
-                    pc = posed.GetConformer()
-                    for i in range(alvo.GetNumAtoms()):
-                        conf.SetAtomPosition(i, pc.GetAtomPosition(i))
-                    alvo.RemoveAllConformers()
-                    alvo.AddConformer(conf, assignId=True)
-                    Chem.SanitizeMol(alvo)
-                    if not any(a.GetNumRadicalElectrons() for a in alvo.GetAtoms()):
-                        with Chem.SDWriter(str(corrigido)) as w:
-                            w.write(alvo)
+                if tmpl is not None and posed is not None:
+                    alvo = Chem.RemoveAllHs(tmpl, sanitize=False)
+                    pz = Chem.RemoveAllHs(posed, sanitize=False)
+                    match = alvo.GetSubstructMatch(pz)
+                    if not match:
+                        try:
+                            par = Chem.AdjustQueryParameters.NoAdjustments()
+                            par.makeBondsGeneric = True
+                            match = alvo.GetSubstructMatch(
+                                Chem.AdjustQueryProperties(pz, par))
+                        except Exception:
+                            match = ()
+                    if (not match and alvo.GetNumAtoms() == pz.GetNumAtoms()
+                            and [a.GetSymbol() for a in alvo.GetAtoms()]
+                                == [a.GetSymbol() for a in pz.GetAtoms()]):
+                        match = tuple(range(alvo.GetNumAtoms()))
+
+                    if match and len(match) == pz.GetNumAtoms():
+                        saida = Chem.Mol(alvo)
+                        conf = Chem.Conformer(saida.GetNumAtoms())
+                        pc = pz.GetConformer()
+                        for i_pose, i_alvo in enumerate(match):
+                            conf.SetAtomPosition(i_alvo, pc.GetAtomPosition(i_pose))
+                        saida.RemoveAllConformers()
+                        saida.AddConformer(conf, assignId=True)
+                        Chem.SanitizeMol(saida)
+                        if not any(a.GetNumRadicalElectrons()
+                                   for a in saida.GetAtoms()):
+                            with Chem.SDWriter(str(corrigido)) as w:
+                                w.write(saida)
                 else:
                     print(f"  [Head não conferido] {r.warhead_id}: pose e SDF "
                           f"do gerador não correspondem átomo a átomo")

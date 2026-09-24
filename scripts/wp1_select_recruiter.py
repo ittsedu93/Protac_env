@@ -202,22 +202,35 @@ def corrigir_ordens(pose, ref):
     if ref is None:
         return pose, "sem referência (química NÃO conferida)"
     try:
-        alvo = Chem.Mol(ref)
+        # O obabel preserva os hidrogênios polares do PDBQT, então a pose
+        # pode ter mais átomos que a molécula preparada. Remove H dos dois
+        # lados antes de qualquer comparação.
+        alvo = Chem.RemoveAllHs(Chem.Mol(ref), sanitize=False)
+        pose = Chem.RemoveAllHs(Chem.Mol(pose), sanitize=False)
         if alvo.GetNumAtoms() != pose.GetNumAtoms():
-            return pose, (f"contagem de átomos difere (preparada "
+            return pose, (f"contagem de átomos pesados difere (preparada "
                           f"{alvo.GetNumAtoms()}, pose {pose.GetNumAtoms()})")
 
         # 1) casamento exato, quando a pose preservou a química
         match = alvo.GetSubstructMatch(pose)
 
-        # 2) identidade: pose e preparada são a MESMA molécula, e a conversão
-        #    sdf -> pdbqt -> sdf preserva a ordem dos átomos pesados. Só é
-        #    aceita depois de conferir elemento por elemento — se um único
-        #    átomo discordar, a correspondência está errada e não se usa.
+        # 2) ligações genéricas: é a ordem de ligação que a pose perdeu, então
+        #    a comparação precisa ignorá-la
         if not match:
-            elems_alvo = [a.GetSymbol() for a in alvo.GetAtoms()]
-            elems_pose = [a.GetSymbol() for a in pose.GetAtoms()]
-            if elems_alvo == elems_pose:
+            try:
+                par = Chem.AdjustQueryParameters.NoAdjustments()
+                par.makeBondsGeneric = True
+                match = alvo.GetSubstructMatch(
+                    Chem.AdjustQueryProperties(pose, par))
+            except Exception:
+                match = ()
+
+        # 3) identidade: pose e preparada são a MESMA molécula, e a conversão
+        #    sdf -> pdbqt -> sdf preserva a ordem dos átomos pesados. Só é
+        #    aceita depois de conferir elemento por elemento.
+        if not match:
+            if ([a.GetSymbol() for a in alvo.GetAtoms()]
+                    == [a.GetSymbol() for a in pose.GetAtoms()]):
                 match = tuple(range(alvo.GetNumAtoms()))
 
         if not match or len(match) != pose.GetNumAtoms():
