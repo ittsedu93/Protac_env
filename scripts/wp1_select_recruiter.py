@@ -182,6 +182,24 @@ def melhor_por_score(arquivos: list[Path]) -> Path:
     return melhor
 
 
+def corrigir_ordens(pose, ref):
+    """Devolve a pose com as ordens de ligação do SDF preparado.
+
+    O PDBQT não guarda ordem de ligação. Na volta para SDF uma amida vira
+    amina com hidrogênio a mais, e o nitrogênio estoura a valência assim que
+    recebe o linker — foi o que derrubou metade das montagens do WP3.
+    AssignBondOrdersFromTemplate transfere as ordens corretas preservando as
+    coordenadas do docking.
+    """
+    if ref is None:
+        return pose, "sem referência (ordens de ligação NÃO conferidas)"
+    try:
+        from rdkit.Chem import AllChem
+        return AllChem.AssignBondOrdersFromTemplate(ref, pose), "corrigidas"
+    except Exception as exc:
+        return pose, f"falha ao corrigir ({type(exc).__name__})"
+
+
 def carregar_mol(caminho: Path, tmp: Path):
     caminho = Path(caminho)
     if caminho.suffix == ".pdbqt":
@@ -427,6 +445,8 @@ def main():
                     ref_prep = Chem.MolFromMolFile(str(cand), removeHs=True)
                     if ref_prep is not None:
                         break
+            mol, nota_ordens = corrigir_ordens(mol, ref_prep)
+            print(f"      ordens de ligação: {nota_ordens}")
             try:
                 ev = exit_vector_do_recrutador(mol, rec_xyz, args.burial,
                                                mol_ref=ref_prep)

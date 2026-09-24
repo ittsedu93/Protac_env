@@ -77,7 +77,7 @@ exige() {  # exige <variável> <mensagem>
 
 if [[ "${LIST:-0}" == "1" ]]; then
   echo "Fases concluídas:"
-  for n in 1 2 3 4 5 6 7; do
+  for n in 1 2 3 4 5 6 7 8; do
     if is_done "$n"; then echo "  [x] fase $n  ($(cat "$(done_marker "$n")"))"
     else echo "  [ ] fase $n"; fi
   done
@@ -283,6 +283,49 @@ if quer 6; then
   mark_done 6
 else
   log "\n[fase 6 pulada]"
+fi
+
+# ===========================================================================
+# FASE 7 — ranquear os PROTACs e escolher o candidato da MD
+# ===========================================================================
+if quer 7; then
+  head_ 7 "Ranquear os PROTACs (segundos)"
+  run_in "$ENV_MDTOOLS" python "$REPO/scripts/rank_protacs.py" \
+      --protacs "$PIPELINE_OUT/wp3/protac_candidates.csv" \
+      --warhead-ranking "${RANKING:-$PIPELINE_OUT/warhead_ranking.csv}" \
+      --subcomplexes "$PIPELINE_OUT/wp2/subcomplexes_manifest.json" \
+      --out "$PIPELINE_OUT/protac_ranking.csv"
+  mark_done 7
+else
+  log "\n[fase 7 pulada]"
+fi
+
+# ===========================================================================
+# FASE 8 — MD do nível (ii) para o candidato escolhido
+# ===========================================================================
+if quer 8 && [[ "${MD_AUTO:-1}" == "1" ]]; then
+  head_ 8 "MD nível (ii) — E3 + recrutador-linker-warhead (horas)"
+
+  run_in "$ENV_MDTOOLS" python "$REPO/scripts/md_prepare.py" \
+      --candidato "$PIPELINE_OUT/md_candidato.json" \
+      --recruiter "$E3_RECRUITER_SDF" \
+      --receptor "$E3_RECEPTOR_PDB" \
+      --rank "${MD_RANK:-1}" \
+      --outdir "$PIPELINE_OUT/md"
+
+  log "\n[\$ md_run.sh $PIPELINE_OUT/md ${MD_N_REPLICAS:-3}]"
+  if [[ $DRY -eq 0 ]]; then
+    NS_PROD="${MD_NS_PROD:-200}" NS_NPT="${MD_NS_NPT:-5}" \
+      bash "$REPO/scripts/md_run.sh" "$PIPELINE_OUT/md" "${MD_N_REPLICAS:-3}" \
+      2>&1 | tee -a "$LOG" || {
+        log "*** a MD falhou; veja $LOG"; exit 1; }
+  fi
+
+  run_in "$ENV_MDTOOLS" python "$REPO/scripts/md_analyze.py" \
+      --md-dir "$PIPELINE_OUT/md"
+  mark_done 8
+else
+  log "\n[fase 8 pulada]"
 fi
 
 # ===========================================================================
