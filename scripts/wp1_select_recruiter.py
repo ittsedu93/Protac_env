@@ -40,6 +40,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from rdkit import Chem, RDLogger
+from rdkit.Chem import rdMolDescriptors
 
 RDLogger.DisableLog("rdApp.*")
 
@@ -207,6 +208,13 @@ def corrigir_ordens(pose, ref):
         # lados antes de qualquer comparação.
         alvo = Chem.RemoveAllHs(Chem.Mol(ref), sanitize=False)
         pose = Chem.RemoveAllHs(Chem.Mol(pose), sanitize=False)
+        # sem sanitizar, a informação de anéis fica sem inicializar e várias
+        # operações de grafo falham com "RingInfo not initialized"
+        for m in (alvo, pose):
+            try:
+                Chem.FastFindRings(m)
+            except Exception:
+                pass
         if alvo.GetNumAtoms() != pose.GetNumAtoms():
             return pose, (f"contagem de átomos pesados difere (preparada "
                           f"{alvo.GetNumAtoms()}, pose {pose.GetNumAtoms()})")
@@ -233,8 +241,36 @@ def corrigir_ordens(pose, ref):
                     == [a.GetSymbol() for a in pose.GetAtoms()]):
                 match = tuple(range(alvo.GetNumAtoms()))
 
+        # 4) último recurso: alinhamento rígido pela subestrutura comum
+        #    máxima. Mesmo um casamento parcial coloca a molécula preparada
+        #    no lugar certo do receptor, e é a química dela que segue adiante.
+        if not match:
+            try:
+                from rdkit.Chem import rdFMCS, rdMolAlign
+                r = rdFMCS.FindMCS([alvo, pose],
+                                   bondCompare=rdFMCS.BondCompare.CompareAny,
+                                   ringMatchesRingOnly=True, timeout=30)
+                q = Chem.MolFromSmarts(r.smartsString)
+                ma, mp = alvo.GetSubstructMatch(q), pose.GetSubstructMatch(q)
+                if ma and mp and len(ma) >= 0.6 * alvo.GetNumAtoms():
+                    saida = Chem.Mol(alvo)
+                    rmsd = rdMolAlign.AlignMol(saida, pose,
+                                               atomMap=list(zip(ma, mp)))
+                    Chem.SanitizeMol(saida)
+                    if not any(a.GetNumRadicalElectrons() for a in saida.GetAtoms()):
+                        return saida, (f"alinhada por MCS ({len(ma)}/"
+                                       f"{alvo.GetNumAtoms()} átomos, "
+                                       f"RMSD {rmsd:.2f} Å)")
+            except Exception:
+                pass
+
         if not match or len(match) != pose.GetNumAtoms():
-            return pose, "estruturas não casaram (química NÃO conferida)"
+            return pose, (
+                "estruturas não casaram (química NÃO conferida)\n"
+                f"        preparada: {Chem.MolToSmiles(alvo)[:90]}\n"
+                f"        pose     : {Chem.MolToSmiles(pose)[:90]}\n"
+                f"        fórmulas : {rdMolDescriptors.CalcMolFormula(alvo)} vs "
+                f"{rdMolDescriptors.CalcMolFormula(pose)}")
 
         pconf = pose.GetConformer()
         novo_conf = Chem.Conformer(alvo.GetNumAtoms())
@@ -444,8 +480,9 @@ def main():
     ap.add_argument("--anchors-sdf", type=Path,
                     help="biblioteca de anchors usada no WP1, para identificar "
                          "o composto de catálogo correspondente")
-    ap.add_argument("--top-n", type=int, default=3,
-                    help="quantos do topo inspecionar por E3")
+    ap.add_argument("--top-n", type=int, default=25,
+                    help="quantos do topo inspecionar por E3; a varredura para "
+                         "no primeiro cuja química se reconstrói")
     ap.add_argument("--out", type=Path, required=True)
     args = ap.parse_args()
 
@@ -456,6 +493,7 @@ def main():
     tmp = out.parent / "_tmp_recruiter"
 
     resultados = {}
+    descartes = {}
     for e3 in args.e3:
         print(f"\n{'=' * 60}\n{e3}\n{'=' * 60}")
         dir_e3 = screening / e3
@@ -486,10 +524,14 @@ def main():
             pose = achar_pose(dir_e3, lig_id) or achar_pose(prep, lig_id)
             if pose is None:
                 print(f"  [{lig_id}] score {score:.2f} — pose não encontrada")
+                descartes.setdefault("pose não encontrada", 0)
+                descartes["pose não encontrada"] += 1
                 continue
             mol = carregar_mol(pose, tmp)
             if mol is None:
                 print(f"  [{lig_id}] pose ilegível: {pose}")
+                descartes.setdefault("pose ilegível", 0)
+                descartes["pose ilegível"] += 1
                 continue
             ref_prep = None
             for cand in (prep / "ligands" / f"{lig_id}.sdf", prep / f"{lig_id}.sdf"):
@@ -519,13 +561,14 @@ def main():
                       f"Confira manualmente antes de aceitar.")
 
             if e3 in resultados:
-                continue                       # guarda só o melhor por E3
+                break        # já temos um utilizável para esta E3 ligase
 
             rad = sum(a.GetNumRadicalElectrons() for a in mol.GetAtoms())
             if rad:
-                print(f"      [DESCARTADO] {rad} elétrons radicalares: a "
-                      f"química desta pose não pôde ser reconstruída, e ela "
-                      f"quebraria o antechamber lá na MD")
+                print(f"      [DESCARTADO] {rad} elétrons radicalares — "
+                      f"seguindo para o próximo do ranking")
+                descartes.setdefault("radicais", 0)
+                descartes["radicais"] += 1
                 continue
 
             sdf = out.parent / f"recruiter_{e3}_{lig_id}.sdf"
@@ -561,6 +604,9 @@ def main():
                 "conferir_cxc": str(cxc),
                 **ev,
             }
+
+    if descartes:
+        print(f"\ndescartes: {descartes}")
 
     if not resultados:
         raise SystemExit(
