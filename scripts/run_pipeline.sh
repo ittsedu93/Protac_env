@@ -316,6 +316,7 @@ if quer 8 && [[ "${MD_AUTO:-1}" == "1" ]]; then
   log "\n[\$ md_run.sh $PIPELINE_OUT/md ${MD_N_REPLICAS:-3}]"
   if [[ $DRY -eq 0 ]]; then
     NS_PROD="${MD_NS_PROD:-200}" NS_NPT="${MD_NS_NPT:-5}" \
+      MD_TRUNCAR_PERTO="${MD_TRUNCAR_PERTO:-}" \
       bash "$REPO/scripts/md_run.sh" "$PIPELINE_OUT/md" "${MD_N_REPLICAS:-3}" \
       2>&1 | tee -a "$LOG" || {
         log "*** a MD falhou; veja $LOG"; exit 1; }

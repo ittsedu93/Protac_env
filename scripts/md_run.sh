@@ -81,6 +81,7 @@ if [[ ! -s complexo.gro ]]; then
     echo -e "\n[2/6] completando resíduos incompletos do receptor"
     python "$(dirname "$0")/fix_receptor_for_md.py" \
         --receptor "$RECEPTOR" --ligante "$MD_DIR/protac.sdf" \
+        ${MD_TRUNCAR_PERTO:+--truncar-perto} \
         --out "$REC_FIX" || {
       echo "*** não foi possível completar o receptor"; exit 1; }
   fi

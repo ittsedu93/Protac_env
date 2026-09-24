@@ -102,18 +102,75 @@ def ler_ligante_xyz(caminho: Path | None):
         return None
 
 
-def reconstruir_chimerax(receptor: Path, alvos, out_pdb: Path):
-    """swapaa para o mesmo tipo de resíduo: recria a cadeia lateral."""
-    script = out_pdb.parent / "fix_receptor.cxc"
-    cmds = [f"open {receptor}"]
-    for r in alvos:
-        cmds.append(f"swapaa /{r['cadeia']}:{r['num']} {r['tipo']} "
-                    f"criteria highest")
+def _tentar_chimerax(receptor: Path, alvos, out_pdb: Path, comando, rotulo: str):
+    """Roda um script ChimeraX e devolve (gerou_arquivo, log)."""
+    script = out_pdb.parent / f"fix_receptor_{rotulo}.cxc"
+    cmds = [f"open {receptor}"] + [comando(r) for r in alvos]
     cmds += [f"save {out_pdb}", "exit"]
     script.write_text("\n".join(cmds) + "\n")
+    if out_pdb.exists():
+        out_pdb.unlink()
     r = subprocess.run([CHIMERAX_EXE, "--nogui", "--exit", str(script)],
                        capture_output=True, text=True)
     return out_pdb.exists(), (r.stdout or "") + (r.stderr or "")
+
+
+def reconstruir(receptor: Path, alvos, out_pdb: Path):
+    """Reconstrói as cadeias laterais, tentando as rotas disponíveis em ordem.
+
+    A sintaxe do `swapaa` do ChimeraX aceita `criteria` como uma sequência de
+    LETRAS (d, c, h, p) ou um número de rotâmero. Passar "highest" faz o
+    parser ler 'h', depois 'i', e falhar com "Unknown criteria: 'i'" — foi o
+    que derrubou a primeira versão. Sem o argumento, ele usa o critério
+    padrão, que é o que se quer.
+
+    Cada rota é verificada pelo mesmo detector que apontou o problema: só
+    conta como sucesso se os resíduos deixarem de estar incompletos.
+    """
+    rotas = [
+        ("swapaa padrão",
+         lambda r: f"swapaa /{r['cadeia']}:{r['num']} {r['tipo']}"),
+        ("swapaa criteria dchp",
+         lambda r: f"swapaa /{r['cadeia']}:{r['num']} {r['tipo']} criteria dchp"),
+        ("swapaa rotâmero 1",
+         lambda r: f"swapaa /{r['cadeia']}:{r['num']} {r['tipo']} criteria 1"),
+    ]
+    for rotulo, comando in rotas:
+        if not Path(CHIMERAX_EXE).exists():
+            break
+        ok, log = _tentar_chimerax(receptor, alvos, out_pdb, comando, rotulo)
+        if ok:
+            restantes = incompletos(out_pdb)
+            print(f"    [{rotulo}] {len(alvos)} -> {len(restantes)} incompletos")
+            if not restantes:
+                return out_pdb, []
+            if len(restantes) < len(alvos):
+                return out_pdb, restantes     # progresso parcial já ajuda
+        else:
+            erro = [l for l in log.splitlines() if "ERROR" in l or "Unknown" in l]
+            print(f"    [{rotulo}] não gerou o arquivo"
+                  + (f": {erro[-1][:80]}" if erro else ""))
+
+    # PDBFixer, se estiver disponível neste env
+    try:
+        from pdbfixer import PDBFixer
+        from openmm.app import PDBFile
+        print("    [pdbfixer] reconstruindo átomos faltantes")
+        fx = PDBFixer(filename=str(receptor))
+        fx.findMissingResidues()
+        fx.findMissingAtoms()
+        fx.addMissingAtoms()
+        with open(out_pdb, "w") as fh:
+            PDBFile.writeFile(fx.topology, fx.positions, fh, keepIds=True)
+        restantes = incompletos(out_pdb)
+        print(f"    [pdbfixer] {len(alvos)} -> {len(restantes)} incompletos")
+        return out_pdb, restantes
+    except ImportError:
+        print("    [pdbfixer] não instalado neste env")
+    except Exception as exc:
+        print(f"    [pdbfixer] falhou: {type(exc).__name__}: {exc}")
+
+    return None, alvos
 
 
 def truncar_para_ala(receptor: Path, alvos, out_pdb: Path):
@@ -146,6 +203,9 @@ def main():
     ap.add_argument("--dist-min-truncar", type=float, default=8.0,
                     help="não trunca resíduo a menos desta distância do "
                          "ligante (Å, default 8)")
+    ap.add_argument("--truncar-perto", action="store_true",
+                    help="aceita truncar resíduo incompleto do sítio; é uma "
+                         "mutação, e precisa constar na descrição do sistema")
     ap.add_argument("--out", type=Path, required=True)
     args = ap.parse_args()
 
@@ -170,42 +230,51 @@ def main():
     if len(faltas) > 20:
         print(f"  ... e mais {len(faltas) - 20}")
 
-    print(f"\n[1] ChimeraX swapaa — reconstruindo as cadeias laterais")
-    ok, log = reconstruir_chimerax(rec, faltas, out)
-    if ok:
-        restantes = incompletos(out)
-        if not restantes:
-            print(f"    reconstruído: {out}")
-            return
-        print(f"    ainda restam {len(restantes)} incompletos")
-        faltas = restantes
-    else:
-        print("    ChimeraX não gerou a estrutura:")
-        print("\n".join("      " + l for l in log.strip().splitlines()[-8:]))
+    print(f"\n[1] Reconstruindo as cadeias laterais")
+    gerado, faltas = reconstruir(rec, faltas, out)
+    if gerado and not faltas:
+        print(f"    todos reconstruídos: {out}")
+        return
 
-    print(f"\n[2] Truncando para alanina o que sobrou")
     for r in faltas:
         if "dist" not in r:
             r["dist"] = dist_ao_ligante(r, lig)
     perto = [r for r in faltas if r["dist"] < args.dist_min_truncar]
-    if perto:
-        print(f"    RECUSADO: {len(perto)} resíduos incompletos a menos de "
-              f"{args.dist_min_truncar} Å do ligante:")
+
+    print(f"\n[2] Restam {len(faltas)} incompletos "
+          f"({len(perto)} a menos de {args.dist_min_truncar} Å do ligante)")
+
+    if perto and not args.truncar_perto:
+        print("\n    Resíduos incompletos no sítio:")
         for r in perto:
             print(f"      {r['cadeia']}:{r['tipo']}{r['num']} "
-                  f"({r['dist']:.1f} Å)")
-        raise SystemExit(
-            "Truncar resíduo do sítio mudaria a interação que se quer medir. "
-            "Reconstrua manualmente (ChimeraX: swapaa) ou escolha outra "
-            "estrutura do receptor.")
+                  f"({r['dist']:.1f} Å) falta "
+                  f"{r['falta_sidechain'] + r['falta_backbone']}")
+        print("\n    Truncar um resíduo do sítio muda a interação que a MD")
+        print("    existe para medir, então isso não é feito por conta própria.")
+        print("\n    Três saídas, em ordem de preferência:")
+        print("      1. reconstruir à mão no ChimeraX e salvar por cima:")
+        for r in perto:
+            print(f"           swapaa /{r['cadeia']}:{r['num']} {r['tipo']}")
+        print(f"           save {out}")
+        print("      2. usar outra estrutura do receptor, com o sítio completo")
+        print("      3. aceitar a truncagem conscientemente, com")
+        print("           --truncar-perto  (registre na descrição do sistema)")
+        raise SystemExit("\nreceptor não pôde ser completado no sítio")
 
-    fonte = out if out.exists() else rec
+    fonte = out if (gerado and out.exists()) else rec
     truncar_para_ala(fonte, faltas, out)
-    print(f"    {len(faltas)} resíduos truncados para ALA (longe do sítio)")
+    print(f"\n    {len(faltas)} resíduos truncados para ALA:")
     for r in faltas:
+        marca = "  <-- NO SÍTIO" if r["dist"] < args.dist_min_truncar else ""
         print(f"      {r['cadeia']}:{r['tipo']}{r['num']} -> ALA "
-              f"({r['dist']:.1f} Å do ligante)")
-    print(f"\n    ATENÇÃO: são mutações. Registre-as na descrição do sistema.")
+              f"({r['dist']:.1f} Å){marca}")
+    print("\n    São MUTAÇÕES. Registre-as na descrição do sistema.")
+
+    sobrando = incompletos(out)
+    if sobrando:
+        raise SystemExit(f"ainda restam {len(sobrando)} incompletos após a "
+                         f"truncagem: {[(r['tipo'], r['num']) for r in sobrando[:5]]}")
     print(f"\n{out}")
 
 
