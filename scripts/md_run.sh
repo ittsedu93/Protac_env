@@ -203,11 +203,20 @@ fi
 GPU="-nb gpu -pme gpu -bonded gpu -update gpu"
 GPU_MENOS="-nb gpu -pme gpu"
 
+# A escada usada em cada etapa. A minimização tem a sua porque `steep` NÃO é um
+# integrador dinâmico: não integra equações de movimento, e por isso o PME e o
+# update na GPU são inválidos ali por definição, não por combinação infeliz
+# ("PME GPU does not support: Non-dynamical integrator"). Só o cálculo de
+# não-ligadas aproveita a placa na minimização.
+ESCADA_MD=("$GPU" "$GPU_MENOS" " ")
+ESCADA_EM=("-nb gpu" " ")
+ESCADA=("${ESCADA_MD[@]}")
+
 mdrun_ok() {  # mdrun_ok <deffnm>
   local nome="$1"; shift
   local log="mdrun_${nome}.out" extra
   local flags
-  for flags in "$GPU" "$GPU_MENOS" " "; do
+  for flags in "${ESCADA[@]}"; do
     # retomada: havendo checkpoint, continua de onde parou em vez de reiniciar
     extra=""
     [[ -f "${nome}.cpt" ]] && extra="-cpi ${nome}.cpt -append"
@@ -215,7 +224,15 @@ mdrun_ok() {  # mdrun_ok <deffnm>
     if "$GMX" mdrun -deffnm "$nome" $extra $flags "$@" 2>&1 | tee "$log"; then
       return 0
     fi
-    if grep -qiE "not satisfied|not supported|cannot be used|incompatible" "$log"; then
+    # As recusas de offload não têm uma redação só. Já vistas:
+    #   "...following condition(s) were not satisfied"   (update na GPU)
+    #   "PME GPU does not support: Non-dynamical integrator"
+    #   "Inconsistency in user input"
+    # Procurar "not supported" não casa com "does not support" — é assim que a
+    # escada deixou de descer numa recusa que era, sim, de offload.
+    if grep -qi "gpu" "$log" && grep -qiE \
+         "not satisfied|not support|cannot be used|cannot compute|incompatible|inconsistency in user input" \
+         "$log"; then
       echo "      o GROMACS recusou este offload — tentando com menos GPU"
       continue
     fi
@@ -234,7 +251,9 @@ etapa() {  # etapa <nome> <mdp> <gro_entrada> [extra_grompp]
 }
 
 echo -e "\n[5/6] minimização e equilíbrio"
+ESCADA=("${ESCADA_EM[@]}")
 etapa em  em.mdp  neutro.gro || { echo "*** minimização falhou"; exit 1; }
+ESCADA=("${ESCADA_MD[@]}")
 etapa nvt nvt.mdp em.gro -r em.gro || { echo "*** NVT falhou"; exit 1; }
 etapa npt npt.mdp nvt.gro -r nvt.gro -t nvt.cpt || { echo "*** NPT falhou"; exit 1; }
 
