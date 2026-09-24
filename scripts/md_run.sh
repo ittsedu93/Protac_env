@@ -91,23 +91,13 @@ if [[ ! -s complexo.gro ]]; then
   gmx_ok proteina.gro "$GMX" pdb2gmx -f "$RECEPTOR" -ff amber14sb \
       -water tip3p -o proteina.gro -p topol.top -i posre_prot.itp -ignh
 
-  # insere o ligante na topologia: #include depois dos includes do campo,
-  # e a linha da molécula no fim de [ molecules ]
-  python3 - "$ITP" <<'PY'
-import sys, re
-from pathlib import Path
-itp = sys.argv[1]
-top = Path("topol.top"); t = top.read_text()
-if "PTC_GMX.itp" not in t:
-    linhas = t.splitlines()
-    # depois do último #include de campo de força
-    ult = max(i for i, l in enumerate(linhas) if l.strip().startswith('#include'))
-    linhas.insert(ult + 1, f'#include "{itp}"')
-    t = "\n".join(linhas)
-    t = t.rstrip() + "\nPTC                 1\n"
-    top.write_text(t)
-    print("      ligante inserido em topol.top")
-PY
+  # O .itp do acpype traz [ atomtypes ] e [ moleculetype ] juntos, e o
+  # GROMACS exige todo atomtypes antes da primeira molécula. build_topology.py
+  # separa os dois e insere cada um no lugar certo, verificando a ordem final.
+  python "$(dirname "$0")/build_topology.py" \
+      --topol topol.top --ligand-itp "$ITP" --ligand-gro "$LIG_GRO" \
+      --resname "$RESNAME" || {
+    echo "*** não consegui montar a topologia do complexo"; exit 1; }
 
   echo "      juntando proteína e ligante"
   python3 - "$LIG_GRO" <<'PY'
