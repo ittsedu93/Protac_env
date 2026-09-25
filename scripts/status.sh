@@ -40,21 +40,44 @@ for n in 1 2 3 4 5 6 7 8; do
 done
 
 # --- 3. dentro da MD -------------------------------------------------------
-echo -e "\nMD, etapa por etapa:"
+echo -e "\nPREPARO DO SISTEMA:"
 for f in protac.pdb complexo.pdb PTC.acpype/PTC_GMX.itp topol.top complexo.gro \
-         neutro.gro grupos.ndx em.gro em2.gro warm.gro nvt.gro npt.gro; do
+         neutro.gro grupos.ndx; do
   printf "  %s %s\n" "$([[ -s "$MD/$f" ]] && echo '[x]' || echo '[ ]')" "$f"
 done
+
+# O equilíbrio é uma escada: cada degrau existe para alimentar o próximo, e
+# depois do npt.gro nenhum dos anteriores é necessário. Listar arquivo por
+# arquivo responde "o que existe no disco" quando a pergunta é "em que estado
+# o pipeline está" — e um intermediário ausente parece falta quando é sobra.
+echo -e "\nEQUILÍBRIO:"
+if [[ -s "$MD/npt.gro" ]]; then
+  echo "  [x] CONCLUÍDO — npt.gro é a estrutura de partida da produção"
+  faltando=()
+  for f in em.gro em2.gro warm.gro nvt.gro; do
+    [[ -s "$MD/$f" ]] || faltando+=("$f")
+  done
+  if (( ${#faltando[@]} )); then
+    echo "      intermediários ausentes: ${faltando[*]}"
+    echo "      (consumidos pelo degrau seguinte; não fazem falta à produção)"
+  fi
+else
+  for f in em.gro em2.gro warm.gro nvt.gro npt.gro; do
+    printf "  %s %s\n" "$([[ -s "$MD/$f" ]] && echo '[x]' || echo '[ ]')" "$f"
+  done
+fi
 
 # --- 3b. progresso da etapa em andamento -----------------------------------
 # O mdrun escreve "step 3200, remaining wall clock time: 123 s" enquanto roda.
 # É a única estimativa honesta de quanto falta: vem do desempenho medido, não
 # de conta de padeiro.
-for f in "$MD"/mdrun_*.out; do
+for f in "$MD"/mdrun_*.out "$MD"/rep*/mdrun_prod.out; do
   [[ -f "$f" ]] || continue
   linha=$(grep -a "remaining wall clock" "$f" | tail -1)
   if [[ -n "$linha" ]]; then
     nome=$(basename "$f" .out); nome=${nome#mdrun_}
+    dir=$(basename "$(dirname "$f")")
+    [[ "$dir" == rep* ]] && nome="$dir"
     echo "  ${nome}: ${linha}"
   fi
 done
@@ -65,7 +88,13 @@ if compgen -G "$MD/rep*" > /dev/null; then
   for rep in "$MD"/rep*/; do
     nome=$(basename "$rep")
     if [[ -s "$rep/prod.gro" ]]; then
-      echo "  $nome: CONCLUÍDA"
+      perf=$(awk '/^Performance:/ {print $2}' "$rep/prod.log" 2>/dev/null | tail -1)
+      if [[ -n "$perf" ]]; then
+        horas=$(awk -v p="$perf" 'BEGIN{printf "%.1f", 200/p*24}')
+        echo "  $nome: CONCLUÍDA — ${perf} ns/dia (${horas} h por réplica)"
+      else
+        echo "  $nome: CONCLUÍDA"
+      fi
       continue
     fi
     if [[ -f "$rep/prod.log" ]]; then
