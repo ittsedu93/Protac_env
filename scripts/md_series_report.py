@@ -44,6 +44,7 @@ def main():
     series = json.loads((md / "md_series.json").read_text())
 
     for chave, rotulo in (("rmsd_prot", "RMSD da proteína (Å)"),
+                          ("rmsd_sitio", "RMSD do sítio do recrutador (Å)"),
                           ("rmsd_lig", "RMSD do PROTAC (Å)"),
                           ("c_rec", "contatos recrutador"),
                           ("c_wh", "contatos warhead")):
@@ -71,6 +72,7 @@ def main():
         print(f"\n{'=' * 66}\nSó a SEGUNDA METADE ({args.ns / 2:.0f}–{args.ns:.0f} ns)"
               f"\n{'=' * 66}")
         for chave, rotulo in (("rmsd_prot", "RMSD da proteína"),
+                              ("rmsd_sitio", "RMSD do sítio"),
                               ("rmsd_lig", "RMSD do PROTAC")):
             vals = []
             for rep in sorted(series):

@@ -238,7 +238,33 @@ def analisar_replica(u, resname: str):
     idx_recrutador = np.where(perto <= mediana)[0]
     idx_warhead = np.where(perto > mediana)[0]
 
+    # E o RMSD do SÍTIO: só os CA perto do recrutador na geometria inicial.
+    #
+    # Um RMSD global alto com o sítio rígido não é desenovelamento: é
+    # movimento de domínio. A CRBN tem uma dobradiça conhecida entre o
+    # domínio tipo-Lon e o domínio de ligação à talidomida, onde o recrutador
+    # ancora. Se o domínio distal gira, o RMSD global sobe muito sem que o
+    # bolso que segura o recrutador mude — e a pergunta do nível (ii) é
+    # exatamente sobre esse bolso, não sobre o resto da proteína.
+    u.trajectory[0]
+    ca = u.select_atoms("protein and name CA")
+    lig_rec = lig[idx_recrutador] if len(idx_recrutador) else lig
+    d_sitio = distance_array(ca.positions, lig_rec.positions).min(axis=1)
+    resids_sitio = sorted({int(a.resid)
+                           for a, dd in zip(ca, d_sitio) if dd <= 12.0})
+    if len(resids_sitio) >= 10:
+        sel_sitio = ("protein and name CA and resid "
+                     + " ".join(str(r) for r in resids_sitio))
+        Rs = rms.RMSD(u, select=sel_sitio, ref_frame=0)
+        Rs.run()
+        rmsd_sitio = Rs.results.rmsd[:, 2]
+    else:
+        rmsd_sitio = rmsd_prot
+        resids_sitio = []
+
+
     c_rec, c_wh = [], []
+    u.trajectory[0]
     for _ in u.trajectory:
         p = u.select_atoms("protein").positions
         d = distance_array(lig.positions, p)
@@ -256,6 +282,9 @@ def analisar_replica(u, resname: str):
         "rmsd_proteina_final": float(rmsd_prot[-1]),
         "rmsd_nucleo_media": float(np.mean(rmsd_nucleo)),
         "rmsd_nucleo_final": float(rmsd_nucleo[-1]),
+        "rmsd_sitio_media": float(np.mean(rmsd_sitio)),
+        "rmsd_sitio_final": float(rmsd_sitio[-1]),
+        "n_residuos_sitio": len(resids_sitio),
         "n_residuos_borda": len(bordas),
         "n_residuos_nucleo": int(n_nucleo),
         "rmsd_protac_media": float(np.mean(rmsd_lig)),
@@ -273,6 +302,7 @@ def analisar_replica(u, resname: str):
         "fracao_frames_ancorado": float(np.mean(
             c_rec >= CRITERIOS["retencao_recrutador_min"] * rec0)),
         "_series": {"rmsd_prot": rmsd_prot.tolist(),
+                    "rmsd_sitio": np.asarray(rmsd_sitio).tolist(),
                     "rmsd_lig": np.asarray(rmsd_lig).tolist(),
                     "c_rec": c_rec.tolist(), "c_wh": c_wh.tolist()},
     }
@@ -307,7 +337,8 @@ def main():
         linhas.append(r)
         print(f"  [{rep}] {r['n_frames']} frames | "
               f"RMSD prot {r['rmsd_proteina_media']:.2f} Å "
-              f"(núcleo {r['rmsd_nucleo_media']:.2f}) | "
+              f"(núcleo {r['rmsd_nucleo_media']:.2f}, "
+              f"sítio {r['rmsd_sitio_media']:.2f}) | "
               f"RMSD PROTAC {r['rmsd_protac_media']:.2f} Å | "
               f"contatos recrut {r['contatos_recrutador_media']:.0f} "
               f"(ret. {r['retencao_recrutador']:.2f}x) / "
@@ -346,7 +377,22 @@ def main():
           f"| {df['n_residuos_borda'].iloc[0]} resíduos de borda excluídos "
           f"({df['n_residuos_nucleo'].iloc[0]} no núcleo)\n")
 
+    # Um RMSD global alto com o sítio rígido é movimento de domínio, não
+    # desenovelamento — e a pergunta do nível (ii) é sobre o bolso que segura o
+    # recrutador. Os dois números aparecem lado a lado de propósito: a
+    # diferença entre eles é o diagnóstico.
+    print(f"  diagnóstico: núcleo {m['rmsd_nucleo_media']:.2f} Å  vs  "
+          f"SÍTIO {m['rmsd_sitio_media']:.2f} Å "
+          f"({df['n_residuos_sitio'].iloc[0]} resíduos a <=12 Å do recrutador)")
+    if m["rmsd_nucleo_media"] > CRITERIOS["rmsd_proteina_max_A"] >= \
+            m["rmsd_sitio_media"]:
+        print("  -> o sítio está rígido e o desvio vem de fora dele: isto é")
+        print("     movimento de DOMÍNIO, não instabilidade da ancoragem.")
+    print()
+
     checks = [
+        ("RMSD do sítio (bolso do recrutador)", m["rmsd_sitio_media"],
+         CRITERIOS["rmsd_proteina_max_A"], "<=", "Å"),
         ("RMSD do núcleo estruturado", m["rmsd_nucleo_media"],
          CRITERIOS["rmsd_proteina_max_A"], "<=", "Å"),
         ("RMSD do PROTAC", m["rmsd_protac_media"],
