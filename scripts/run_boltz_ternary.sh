@@ -21,8 +21,9 @@ CONF="$(dirname "$0")/../config/pipeline.conf"
 WORK="${WORK:-$HOME/PRosettaC_runs/vhl_crbn_pcsk9_protac}"
 ENV_BOLTZ="${ENV_BOLTZ:-gustavo_boltz-2}"
 
-CAND="${1:?uso: run_boltz_ternary.sh <candidate_id> [n_amostras]}"
+CAND="${1:?uso: run_boltz_ternary.sh <candidate_id> [n_amostras] [n_lotes]}"
 N_AMOSTRAS="${2:-5}"
+N_LOTES="${3:-1}"
 DIR="$WORK/boltz_ternario/$CAND"
 YAML="$DIR/ternary.yaml"
 
@@ -68,7 +69,7 @@ fi
 
 OPCOES=()
 for flag in --out_dir --use_msa_server --output_format --diffusion_samples \
-            --no_kernels --override; do
+            --no_kernels --override --seed; do
   if grep -q -- "$flag" <<< "$AJUDA"; then
     OPCOES+=("$flag")
   else
@@ -85,12 +86,17 @@ for flag in "${OPCOES[@]}"; do
     --diffusion_samples)  CMD+=(--diffusion_samples "$N_AMOSTRAS") ;;
     --no_kernels)         TEM_NO_KERNELS=1 ;;
     --override)           TEM_OVERRIDE=1 ;;
+    --seed)               TEM_SEED=1 ;;
   esac
 done
 TEM_NO_KERNELS="${TEM_NO_KERNELS:-0}"
 TEM_OVERRIDE="${TEM_OVERRIDE:-0}"
+TEM_SEED="${TEM_SEED:-0}"
 
 # Havendo predição anterior, o Boltz PULA em vez de refazer:
+if [[ "$N_LOTES" -gt 1 ]]; then
+  : # em modo lote cada lote tem o seu diretório; nada a sobrescrever
+elif true; then
 #     Found some existing predictions (1), skipping and running only the
 #     missing ones, if any.
 # Numa repetição isso é o contrário do que se quer — a repetição existe
@@ -108,6 +114,7 @@ if compgen -G "$DIR/boltz_results_*/predictions/*/confidence_*.json" > /dev/null
     echo "***   rm -rf $DIR/boltz_results_*"
     exit 1
   fi
+fi
 fi
 
 echo "  comando: conda run -n $ENV_BOLTZ ${CMD[*]}"
@@ -127,24 +134,46 @@ fi
 # `--no_kernels` usa a implementação nativa: mais lenta, mesmo resultado.
 # Tentar e cair é melhor que decidir de antemão — quando os kernels existem,
 # eles valem a pena.
+# Amostrar mais NÃO é pedir um lote maior. 20 amostras de uma vez estouraram
+# a memória da placa e o processo morreu depois de 10 minutos parado em 0%;
+# 5 amostras cabem (com folga apertada, já avisando OOM). Então amostra-se em
+# LOTES de 5, cada um no seu diretório e com semente própria — mesma memória,
+# mais amostras, e a estatística que a pergunta exige.
 RUNNER="$DIR/.boltz_run.sh"
 {
   echo '#!/usr/bin/env bash'
   echo 'set -uo pipefail'
-  printf 'conda run -n %q ' "$ENV_BOLTZ"
-  printf '%q ' "${CMD[@]}"
-  echo
-  if [[ "$TEM_NO_KERNELS" == "1" ]]; then
-    echo 'codigo=$?'
-    echo 'if [[ $codigo -ne 0 ]] && grep -qi "cuequivariance\|triangle_multiplicative" "'"$DIR"'/boltz.log"; then'
-    echo '  echo ""'
-    echo '  echo "=== os kernels do cuequivariance não carregaram; repetindo com --no_kernels ==="'
-    printf '  conda run -n %q ' "$ENV_BOLTZ"
-    printf '%q ' "${CMD[@]}"
-    printf -- '--no_kernels
-'
-    echo 'fi'
-  fi
+  for ((lote=1; lote<=N_LOTES; lote++)); do
+    if [[ "$N_LOTES" -gt 1 ]]; then
+      saida="$DIR/lote_$lote"
+      echo "mkdir -p $(printf '%q' "$saida")"
+      echo "echo \"=== lote $lote/$N_LOTES ===\""
+    else
+      saida="$DIR"
+    fi
+    linha=()
+    for x in "${CMD[@]}"; do
+      linha+=("$x")
+    done
+    # troca o out_dir pelo do lote
+    for i in "${!linha[@]}"; do
+      if [[ "${linha[$i]}" == "$DIR" ]]; then linha[$i]="$saida"; fi
+    done
+    [[ "$TEM_SEED" == "1" ]] && linha+=(--seed "$((1000 + lote * 97))")
+    printf 'conda run -n %q ' "$ENV_BOLTZ"
+    printf '%q ' "${linha[@]}"
+    echo
+    if [[ "$TEM_NO_KERNELS" == "1" && "$lote" -eq 1 ]]; then
+      echo 'codigo=$?'
+      echo 'if [[ $codigo -ne 0 ]] && grep -qi "cuequivariance\|triangle_multiplicative" "'"$DIR"'/boltz.log"; then'
+      echo '  echo "=== kernels do cuequivariance ausentes; repetindo com --no_kernels ==="'
+      echo '  USAR_NO_KERNELS=1'
+      printf '  conda run -n %q ' "$ENV_BOLTZ"
+      printf '%q ' "${linha[@]}"
+      printf -- '--no_kernels\n'
+      echo 'fi'
+    fi
+  done
 } > "$RUNNER"
 chmod +x "$RUNNER"
 

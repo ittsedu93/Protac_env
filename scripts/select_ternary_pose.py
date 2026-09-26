@@ -47,6 +47,14 @@ def mapa_de_cadeias(entradas: Path):
     return {i: papel(desc) for i, desc in enumerate(ids.values())}, d
 
 
+def nome_modelo(p: Path, base: Path) -> str:
+    """Nome único: o mesmo `ternary_model_0` existe em cada lote."""
+    nome = p.stem.replace("confidence_", "")
+    rel = p.relative_to(base).parts
+    lote = next((x for x in rel if x.startswith("lote_")), None)
+    return f"{lote}/{nome}" if lote else nome
+
+
 def par(m, a, b):
     """ipTM do par, simetrizado: a matriz do Boltz não é simétrica."""
     try:
@@ -72,7 +80,11 @@ def main():
         raise SystemExit(f"não achei {entradas}")
     cadeias, info = mapa_de_cadeias(entradas)
 
-    preds = sorted(base.glob("boltz_results_*/predictions/*/confidence_*.json"))
+    # rglob e não glob: as amostras podem estar em vários lotes
+    # (lote_1/, lote_2/, ...), porque 20 amostras de uma vez estouram a
+    # memória da placa e 4 lotes de 5 não. Todas contam para a mesma
+    # estatística.
+    preds = sorted(base.rglob("confidence_*.json"))
     if not preds:
         raise SystemExit(f"não achei confidence_*.json sob {base}")
 
@@ -95,7 +107,7 @@ def main():
         pares_lig = [par(m, a, b) for a in idx_lig for b in (idx_e3 + idx_alvo)]
         pares_lig = [x for x in pares_lig if x is not None]
         linhas.append({
-            "modelo": p.stem.replace("confidence_", ""),
+            "modelo": nome_modelo(p, base),
             "confidence": round(d.get("confidence_score", float("nan")), 3),
             "iptm_E3_alvo": round(min(pares), 3) if pares else None,
             "ligand_iptm": round(d.get("ligand_iptm", float("nan")), 3),
@@ -130,6 +142,22 @@ def main():
         w.writeheader()
         for l in linhas:
             w.writerow({c: l[c] for c in cols})
+
+    n_ok = sum(1 for l in linhas if l["aprovado"])
+    print(f"\n  {n_ok} de {len(linhas)} modelos passam o corte de interface "
+          f"({100 * n_ok / len(linhas):.0f}%).")
+    if len(linhas) >= 10:
+        if n_ok / len(linhas) < 0.25:
+            print("  Com essa proporção, o Boltz NÃO determina esta geometria:")
+            print("  o modelo aprovado pode ser sorte de amostragem. O")
+            print("  PRosettaC, que parte das duas poses já validadas, passa a")
+            print("  ser a fonte principal — não o segundo parecer.")
+        else:
+            print("  Proporção consistente: a geometria se reproduz entre")
+            print("  amostras independentes, o que é evidência real.")
+    else:
+        print("  Poucas amostras para concluir sobre reprodutibilidade.")
+        print("  Amostre em lotes: run_boltz_ternary.sh <cand> 5 4")
 
     melhores = [l for l in linhas if l["aprovado"]]
     if not melhores:
