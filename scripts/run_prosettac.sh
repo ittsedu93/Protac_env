@@ -64,6 +64,34 @@ while read -r chave valores; do
 done < "$DIR/prosetta_config.txt"
 [[ $falta -eq 0 ]] || { echo -e "\n*** arquivos de entrada ausentes"; exit 1; }
 
+# As CADEIAS existem nas estruturas? O clean_pdb do Rosetta não reclama alto:
+# ele imprime "0 --- --- --- --- BAD", segue, e o erro aparece depois como um
+# .fasta que não existe. Conferir aqui custa um segundo e aponta a causa.
+ESTRUTURAS=$(awk -F': ' '/^Structures:/{print $2}' "$DIR/prosetta_config.txt")
+CADEIAS=$(awk -F': ' '/^Chains:/{print $2}' "$DIR/prosetta_config.txt")
+i=1
+erro_cadeia=0
+for est in $ESTRUTURAS; do
+  cad=$(echo "$CADEIAS" | cut -d' ' -f$i)
+  presentes=$(awk '/^ATOM/{print substr($0,22,1)}' "$est" | sort -u | tr -d '\n')
+  n=$(awk -v c="$cad" '/^ATOM/ && substr($0,22,1)==c{print substr($0,23,5)}' \
+        "$est" | sort -u | wc -l)
+  if [[ "$n" -eq 0 ]]; then
+    echo "  [CADEIA ERRADA] $(basename "$est"): pediu '$cad', tem '$presentes'"
+    erro_cadeia=1
+  else
+    echo "  cadeia $cad de $(basename "$est"): $n resíduos"
+  fi
+  i=$((i+1))
+done
+if [[ $erro_cadeia -eq 1 ]]; then
+  echo
+  echo "*** Corrija a linha Chains: do config antes de lançar:"
+  echo "***   nano $DIR/prosetta_config.txt"
+  exit 1
+fi
+echo
+
 ANCHORS=$(awk -F': ' '/^Anchor atoms:/{print $2}' "$DIR/prosetta_config.txt")
 echo "  Anchor atoms = $ANCHORS"
 echo "  >>> CONFIRA no resultado deste job que os âncoras são os átomos que"
