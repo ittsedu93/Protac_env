@@ -20,14 +20,20 @@ PROSETTAC="${PROSETTAC_DIR:-/mnt/hd2tb/Documentos/PRosettaC}"
 
 CAND="${1:?uso: run_prosettac.sh <candidate_id> [--lote]}"
 LOTE="${2:-}"
-DIR="$OUT/$CAND"
+# A fase 6 escreve os jobs em $PIPELINE_OUT/wp3/<candidato> (o --outdir do
+# wp3_assemble_protacs.py), não na raiz do pipeline.
+DIR="$OUT/wp3/$CAND"
+[[ -d "$DIR" ]] || DIR="$OUT/$CAND"
 
 [[ -d "$PROSETTAC" ]] || { echo "não achei o PRosettaC em $PROSETTAC"; exit 1; }
 [[ -x "$PROSETTAC/run_prosettac.sh" ]] || {
   echo "não achei $PROSETTAC/run_prosettac.sh (executável)"; exit 1; }
 [[ -s "$DIR/prosetta_config.txt" ]] || {
   echo "não achei $DIR/prosetta_config.txt"
-  echo "ele é escrito pela fase 6 (wp3_assemble_protacs.py)"; exit 1; }
+  echo "ele é escrito pela fase 6 (wp3_assemble_protacs.py)."
+  echo "Candidatos com job emitido:"
+  ls -1 "$OUT/wp3" 2>/dev/null | sed 's/^/    /' | head -20
+  exit 1; }
 
 echo "=============================================================="
 echo "PRosettaC — $CAND"
@@ -74,5 +80,5 @@ if [[ "$LOTE" == "--lote" ]]; then
   echo
   echo "*** --lote foi ignorado de propósito nesta execução."
   echo "*** Confira o Anchor atoms deste job PRIMEIRO; depois rode"
-  echo "***   bash $OUT/launch_all.sh"
+  echo "***   bash $OUT/wp3/launch_all.sh"
 fi

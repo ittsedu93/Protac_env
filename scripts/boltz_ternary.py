@@ -34,6 +34,39 @@ TRES_PARA_UM = {
 }
 
 
+def sequencias_por_cadeia(pdb: Path, cadeias=None):
+    """Uma sequência POR CADEIA, nunca concatenadas.
+
+    Concatenar cadeias distintas numa única entrada de proteína inventa uma
+    ligação peptídica entre elas. A PCSK9 é o caso típico: o prodomínio
+    permanece ligado NÃO covalentemente depois da clivagem autocatalítica, e
+    emendá-lo à cadeia catalítica produziria uma molécula que não existe.
+    """
+    por_cadeia, faltantes, vistos = {}, set(), set()
+    for l in pdb.read_text().splitlines():
+        if not l.startswith(("ATOM", "HETATM")):
+            continue
+        if l[16] not in (" ", "A"):
+            continue
+        cad = l[21]
+        if cadeias and cad not in cadeias:
+            continue
+        chave = (cad, l[22:27])
+        if chave in vistos:
+            continue
+        vistos.add(chave)
+        nome = l[17:20].strip().upper()
+        if nome in TRES_PARA_UM:
+            por_cadeia.setdefault(cad, []).append(TRES_PARA_UM[nome])
+        elif nome in ("HOH", "WAT", "NA", "CL", "SOL", "ZN", "MG", "CA"):
+            continue
+        else:
+            faltantes.add(nome)
+    # cadeias curtas demais são peptídeos de cristalização, não a proteína
+    return ({c: "".join(s) for c, s in por_cadeia.items() if len(s) >= 20},
+            sorted(faltantes))
+
+
 def sequencia(pdb: Path, cadeia: str | None = None):
     """Sequência de uma letra, na ordem do arquivo, sem depender de bibliotecas.
 
@@ -80,7 +113,10 @@ def main():
     ap.add_argument("--e3-pdb", type=Path, default=None)
     ap.add_argument("--e3-chain", default=None)
     ap.add_argument("--pcsk9-pdb", type=Path, default=None)
-    ap.add_argument("--pcsk9-chain", default="B")
+    ap.add_argument("--pcsk9-chain", default=None,
+                    help="default: TODAS as cadeias do receptor preparado — "
+                         "a PCSK9 madura é de duas cadeias e o docking manteve "
+                         "as duas (PCSK9_KEEP_CHAINS)")
     ap.add_argument("--smiles", default=None)
     ap.add_argument("--out", type=Path, default=None)
     args = ap.parse_args()
@@ -94,8 +130,8 @@ def main():
         work / "prep" / "CRBN_4TZ4" / "4TZ4_receptor.pdb",
         work / "pipeline" / "md" / "receptor_fixed.pdb")
     pcsk9 = args.pcsk9_pdb or achar(
+        Path.home() / "PCSK9_docking" / "receptor" / "6U26_receptor.pdb",
         Path.home() / "PCSK9_docking" / "receptor.pdb",
-        Path.home() / "PCSK9_docking" / "6U26_receptor.pdb",
         Path.home() / "structures" / "6U26.pdb")
     if e3 is None or pcsk9 is None:
         raise SystemExit(
@@ -126,53 +162,68 @@ def main():
         raise SystemExit(f"não achei o SMILES de {args.candidato}. "
                          f"Passe --smiles.")
 
-    # --- sequências -------------------------------------------------------
-    seq_e3, falta_e3 = sequencia(e3, args.e3_chain)
-    seq_pc, falta_pc = sequencia(pcsk9, args.pcsk9_chain)
+    # --- sequências, uma entrada por cadeia -------------------------------
+    cad_e3 = [args.e3_chain] if args.e3_chain else None
+    cad_pc = [args.pcsk9_chain] if args.pcsk9_chain else None
+    seqs_e3, falta_e3 = sequencias_por_cadeia(e3, cad_e3)
+    seqs_pc, falta_pc = sequencias_por_cadeia(pcsk9, cad_pc)
 
     print(f"candidato: {args.candidato}")
-    print(f"  E3    : {e3.name}"
-          + (f" cadeia {args.e3_chain}" if args.e3_chain else " (todas)")
-          + f" -> {len(seq_e3)} resíduos")
-    print(f"  PCSK9 : {pcsk9.name} cadeia {args.pcsk9_chain} "
-          f"-> {len(seq_pc)} resíduos")
+    print(f"  E3    : {e3.name}")
+    for c, s in sorted(seqs_e3.items()):
+        print(f"            cadeia {c or '(sem id)'}: {len(s)} resíduos")
+    print(f"  PCSK9 : {pcsk9.name}")
+    for c, s in sorted(seqs_pc.items()):
+        print(f"            cadeia {c or '(sem id)'}: {len(s)} resíduos")
     print(f"  PROTAC: {smi[:70]}{'...' if len(smi) > 70 else ''}")
     for rot, falta in (("E3", falta_e3), ("PCSK9", falta_pc)):
         if falta:
-            print(f"  [ATENÇÃO] resíduos não reconhecidos em {rot}: {falta}")
-            print(f"            eles NÃO entraram na sequência — confira se "
-                  f"são heteroátomos (ok) ou aminoácidos (não ok)")
-    if len(seq_e3) < 50 or len(seq_pc) < 50:
+            print(f"  [nota] resíduos fora da sequência em {rot}: {falta}")
+            print(f"         (heteroátomos e ligantes do cristal são esperados "
+                  f"aqui; aminoácido nesta lista não é)")
+    if not seqs_e3 or not seqs_pc:
         raise SystemExit(
-            "sequência curta demais para ser uma proteína — cadeia errada?\n"
+            "não extraí sequência de um dos receptores — cadeia errada?\n"
             "Liste as cadeias com: grep '^ATOM' <pdb> | cut -c22 | sort -u")
 
-    # --- YAML -------------------------------------------------------------
+    total = sum(len(s) for s in seqs_e3.values()) + \
+        sum(len(s) for s in seqs_pc.values())
+    print(f"\n  total: {total} resíduos em "
+          f"{len(seqs_e3) + len(seqs_pc)} cadeias")
+    if total > 1400:
+        print(f"  [ATENÇÃO] sistema grande para o Boltz-2. Se estourar a "
+              f"memória da GPU, rode com 1 amostra.")
+
+    # --- YAML: uma entrada de proteína POR CADEIA -------------------------
+    ids = "ABCDEFGHIJKMNOPQRSTUVWXYZ"          # L fica para o ligante
+    linhas_yaml, mapa = ["version: 1", "sequences:"], {}
+    i = 0
+    for rotulo, seqs in (("E3", seqs_e3), ("PCSK9", seqs_pc)):
+        for c, s in sorted(seqs.items()):
+            linhas_yaml += ["  - protein:", f"      id: {ids[i]}",
+                            f'      sequence: "{s}"']
+            mapa[ids[i]] = f"{rotulo} cadeia {c or '?'} ({len(s)} res)"
+            i += 1
+    linhas_yaml += ["  - ligand:", "      id: L", f'      smiles: "{smi}"']
+    mapa["L"] = "PROTAC"
+
     yaml = out / "ternary.yaml"
-    yaml.write_text(
-        "version: 1\n"
-        "sequences:\n"
-        "  - protein:\n"
-        "      id: A\n"
-        f"      sequence: \"{seq_e3}\"\n"
-        "  - protein:\n"
-        "      id: B\n"
-        f"      sequence: \"{seq_pc}\"\n"
-        "  - ligand:\n"
-        "      id: L\n"
-        f"      smiles: \"{smi}\"\n")
+    yaml.write_text("\n".join(linhas_yaml) + "\n")
 
     (out / "entradas.json").write_text(json.dumps({
         "candidate_id": args.candidato,
-        "e3_pdb": str(e3), "e3_chain": args.e3_chain,
-        "e3_residues": len(seq_e3),
-        "pcsk9_pdb": str(pcsk9), "pcsk9_chain": args.pcsk9_chain,
-        "pcsk9_residues": len(seq_pc),
+        "e3_pdb": str(e3),
+        "e3_chains": {c: len(s) for c, s in seqs_e3.items()},
+        "pcsk9_pdb": str(pcsk9),
+        "pcsk9_chains": {c: len(s) for c, s in seqs_pc.items()},
+        "boltz_ids": mapa,
+        "total_residues": total,
         "protac_smiles": smi,
     }, indent=2))
 
     print(f"\n  {yaml}")
-    print(f"  cadeia A = E3 (CRBN) | cadeia B = PCSK9 | L = PROTAC")
+    for k, v in mapa.items():
+        print(f"    id {k} = {v}")
     print(f"\nPróximo: bash scripts/run_boltz_ternary.sh {args.candidato}")
 
 
