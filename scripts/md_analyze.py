@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 from pathlib import Path
 
 import numpy as np
@@ -40,13 +41,79 @@ CRITERIOS = {
 }
 
 
+GMX = "/usr/local/gromacs/bin/gmx"
+
+
+def topologia_legivel(md_dir: Path, rep: str, gmx: str = GMX):
+    """Arquivo de topologia que o MDAnalysis consiga ler.
+
+    O .tpr do GROMACS 2026 está na versão tpx 138, e o TPRParser do
+    MDAnalysis para nela:
+
+        ValueError: Your tpx version is 138, which this parser does not
+        support, yet
+
+    Isso não é problema dos dados: o .tpr é pedido apenas por causa dos nomes
+    de átomo, nomes de resíduo e numeração, e tudo isso está igualmente num
+    .gro do MESMO sistema. Ligações não são usadas em lugar nenhum desta
+    análise. Tenta-se o .tpr primeiro para não mudar o comportamento onde ele
+    funciona; não dando, usa-se um .gro, e em último caso pede-se ao próprio
+    gmx que converta o .tpr — ele sempre entende o formato que ele mesmo
+    escreveu.
+    """
+    import MDAnalysis as mda
+
+    rep_dir = md_dir / rep
+    tpr = rep_dir / "prod.tpr"
+
+    if tpr.exists():
+        try:
+            mda.Universe(str(tpr))
+            return tpr, "prod.tpr"
+        except Exception as e:
+            motivo = str(e).splitlines()[-1][:90]
+            print(f"      o MDAnalysis não lê {rep}/prod.tpr ({motivo})")
+
+    # um .gro do mesmo sistema tem a mesma ordem de átomos que a trajetória
+    for alt, rotulo in ((rep_dir / "prod.gro", f"{rep}/prod.gro"),
+                        (md_dir / "npt.gro", "npt.gro")):
+        if alt.exists():
+            print(f"      usando {rotulo} como topologia")
+            return alt, rotulo
+
+    # último recurso: o próprio gmx converte o .tpr que só ele entende
+    gro = rep_dir / "topol_mda.gro"
+    if tpr.exists() and not gro.exists():
+        subprocess.run([gmx, "editconf", "-f", str(tpr), "-o", str(gro)],
+                       capture_output=True, text=True)
+    if gro.exists():
+        print(f"      usando {gro.name} (convertido do .tpr pelo gmx)")
+        return gro, gro.name
+
+    raise SystemExit(
+        f"não achei topologia legível para {rep}: nem um .tpr que o "
+        f"MDAnalysis leia, nem um .gro do sistema solvatado.")
+
+
 def carregar(md_dir: Path, rep: str):
     import MDAnalysis as mda
-    tpr = md_dir / rep / "prod.tpr"
     xtc = md_dir / rep / "prod.xtc"
-    if not (tpr.exists() and xtc.exists()):
+    if not xtc.exists():
         return None
-    return mda.Universe(str(tpr), str(xtc))
+    top, _ = topologia_legivel(md_dir, rep)
+    u = mda.Universe(str(top), str(xtc))
+
+    # Um .gro não traz elementos, e as seleções dependem de nomes. Conferir
+    # aqui evita um RMSD calculado sobre zero átomo mais adiante.
+    n_ca = len(u.select_atoms("protein and name CA"))
+    if n_ca == 0:
+        nomes = sorted({r.resname for r in u.residues})[:25]
+        raise SystemExit(
+            f"a seleção 'protein and name CA' não achou nada em {rep}.\n"
+            f"Resíduos vistos: {nomes}\n"
+            f"Se os nomes não são os padrão do campo de força, a topologia "
+            f"({top.name}) não corresponde a esta trajetória.")
+    return u
 
 
 def descobrir_resname(u, pedido: str) -> str:
