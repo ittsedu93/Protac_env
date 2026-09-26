@@ -32,13 +32,27 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+# Os contatos são contados como PARES DE ÁTOMOS a menos de 4,5 Å. Um fragmento
+# ancorado na superfície de uma proteína tem centenas desses pares, então
+# cortes absolutos (a versão anterior usava 20 e 15) não significam nada: 15
+# pares seria exigir que a warhead flutuasse no vácuo. Os critérios abaixo são
+# RELATIVOS — ao frame inicial, que é a geometria validada pelo docking, e ao
+# próprio recrutador, que dá a escala do que é "muito contato com a E3" nesta
+# molécula e neste sistema.
 CRITERIOS = {
-    "rmsd_proteina_max_A": 3.5,      # acima disso o sistema não equilibrou
-    "rmsd_protac_max_A": 5.0,        # o PROTAC é flexível; o corte é generoso
-    "contatos_recrutador_min": 20,   # ancoragem mantida na média da trajetória
-    "contatos_warhead_max": 15,      # acima disso há interação espúria com a E3
+    "rmsd_proteina_max_A": 3.5,       # acima disso o sistema não equilibrou
+    "rmsd_protac_max_A": 5.0,         # o PROTAC é flexível; o corte é generoso
+    "retencao_recrutador_min": 0.5,   # metade dos contatos iniciais mantida
+    "razao_warhead_max": 1.0,         # warhead não pode engajar a E3 tanto
+                                      # quanto o recrutador, que foi desenhado
+                                      # para isso
+    "crescimento_warhead_max": 2.0,   # vs. o frame inicial
     "fracao_frames_ancorado_min": 0.7,
 }
+
+# Uma proteína enovelada de 361 resíduos não passa disto em 200 ns. Passando,
+# o número não é físico: é a aresta da caixa periódica entrando na conta.
+RMSD_IMPOSSIVEL_A = 10.0
 
 
 GMX = "/usr/local/gromacs/bin/gmx"
@@ -97,9 +111,21 @@ def topologia_legivel(md_dir: Path, rep: str, gmx: str = GMX):
 
 def carregar(md_dir: Path, rep: str):
     import MDAnalysis as mda
+    # A trajetória tratada por md_fix_pbc.sh tem preferência: sem isso, os
+    # cinco segmentos de cadeia criados ao cortar as lacunas do cristal são
+    # envolvidos independentemente pela caixa periódica, e o RMSD mede a
+    # aresta da caixa.
+    solutos_xtc = md_dir / rep / "solutos.xtc"
+    solutos_gro = md_dir / rep / "solutos.gro"
+    if solutos_xtc.exists() and solutos_gro.exists():
+        print(f"      usando solutos.xtc (PBC corrigida)")
+        return mda.Universe(str(solutos_gro), str(solutos_xtc))
+
     xtc = md_dir / rep / "prod.xtc"
     if not xtc.exists():
         return None
+    print(f"      [ATENÇÃO] usando prod.xtc SEM correção de PBC — "
+          f"rode antes: bash scripts/md_fix_pbc.sh {md_dir}")
     top, _ = topologia_legivel(md_dir, rep)
     u = mda.Universe(str(top), str(xtc))
 
@@ -178,19 +204,32 @@ def analisar_replica(u, resname: str):
         c_rec.append(int((d[idx_recrutador] <= 4.5).sum()))
         c_wh.append(int((d[idx_warhead] <= 4.5).sum()))
 
+    c_rec = np.array(c_rec, dtype=float)
+    c_wh = np.array(c_wh, dtype=float)
+    rec0 = max(c_rec[0], 1.0)      # a geometria de partida é a referência
+    wh0 = max(c_wh[0], 1.0)
+
     return {
         "n_frames": len(rmsd_prot),
         "rmsd_proteina_media": float(np.mean(rmsd_prot)),
         "rmsd_proteina_final": float(rmsd_prot[-1]),
         "rmsd_protac_media": float(np.mean(rmsd_lig)),
         "rmsd_protac_final": float(rmsd_lig[-1]),
+        "contatos_recrutador_inicial": float(c_rec[0]),
         "contatos_recrutador_media": float(np.mean(c_rec)),
+        "contatos_warhead_inicial": float(c_wh[0]),
         "contatos_warhead_media": float(np.mean(c_wh)),
+        # quanto da ancoragem inicial sobrou
+        "retencao_recrutador": float(np.mean(c_rec) / rec0),
+        # a warhead engaja a E3 tanto quanto o recrutador?
+        "razao_warhead": float(np.mean(c_wh) / max(np.mean(c_rec), 1.0)),
+        # e ela engajou MAIS do que engajava no início?
+        "crescimento_warhead": float(np.mean(c_wh) / wh0),
         "fracao_frames_ancorado": float(np.mean(
-            np.array(c_rec) >= CRITERIOS["contatos_recrutador_min"])),
+            c_rec >= CRITERIOS["retencao_recrutador_min"] * rec0)),
         "_series": {"rmsd_prot": rmsd_prot.tolist(),
                     "rmsd_lig": np.asarray(rmsd_lig).tolist(),
-                    "c_rec": c_rec, "c_wh": c_wh},
+                    "c_rec": c_rec.tolist(), "c_wh": c_wh.tolist()},
     }
 
 
@@ -224,8 +263,10 @@ def main():
         print(f"  [{rep}] {r['n_frames']} frames | "
               f"RMSD prot {r['rmsd_proteina_media']:.2f} Å | "
               f"RMSD PROTAC {r['rmsd_protac_media']:.2f} Å | "
-              f"contatos recrut {r['contatos_recrutador_media']:.0f} / "
-              f"warhead {r['contatos_warhead_media']:.0f}")
+              f"contatos recrut {r['contatos_recrutador_media']:.0f} "
+              f"(ret. {r['retencao_recrutador']:.2f}x) / "
+              f"warhead {r['contatos_warhead_media']:.0f} "
+              f"(razão {r['razao_warhead']:.2f})")
 
     if not linhas:
         raise SystemExit("nenhuma réplica analisável")
@@ -237,15 +278,35 @@ def main():
     m = df.mean(numeric_only=True)
     print(f"\n{'=' * 66}\nVEREDITO (média de {len(df)} réplicas)\n{'=' * 66}")
 
+    # Guarda de sanidade ANTES do veredito. Um RMSD que a física não permite
+    # não é um resultado ruim: é um número que não mede o que diz medir, e
+    # emitir veredito sobre ele seria pior que não emitir nenhum.
+    if m["rmsd_proteina_media"] > RMSD_IMPOSSIVEL_A:
+        print(f"\n  [!] RMSD da proteína = {m['rmsd_proteina_media']:.1f} Å.")
+        print(f"      Uma proteína enovelada não faz isso em 200 ns. Quase")
+        print(f"      certamente a condição periódica de contorno não foi")
+        print(f"      desfeita: ao cortar as lacunas do cristal, a proteína")
+        print(f"      virou 5 moléculas, e o GROMACS envolve cada uma")
+        print(f"      independentemente na caixa.")
+        print(f"      Confirme pela contradição: 'frações ancoradas' alto")
+        print(f"      junto de RMSD alto é impossível ao mesmo tempo.")
+        print(f"\n      Corrija e reanalise (minutos, sem GPU):")
+        print(f"        bash scripts/md_fix_pbc.sh {md}")
+        print(f"        python scripts/md_analyze.py --md-dir {md}")
+        raise SystemExit("\n  veredito NÃO emitido: a trajetória precisa de "
+                         "correção de PBC antes de significar alguma coisa.")
+
     checks = [
         ("RMSD da proteína", m["rmsd_proteina_media"],
          CRITERIOS["rmsd_proteina_max_A"], "<=", "Å"),
         ("RMSD do PROTAC", m["rmsd_protac_media"],
          CRITERIOS["rmsd_protac_max_A"], "<=", "Å"),
-        ("contatos recrutador–E3", m["contatos_recrutador_media"],
-         CRITERIOS["contatos_recrutador_min"], ">=", ""),
-        ("contatos warhead–E3 (espúrio)", m["contatos_warhead_media"],
-         CRITERIOS["contatos_warhead_max"], "<=", ""),
+        ("ancoragem do recrutador mantida", m["retencao_recrutador"],
+         CRITERIOS["retencao_recrutador_min"], ">=", "x inicial"),
+        ("warhead/recrutador (espúrio)", m["razao_warhead"],
+         CRITERIOS["razao_warhead_max"], "<=", ""),
+        ("crescimento do contato warhead–E3", m["crescimento_warhead"],
+         CRITERIOS["crescimento_warhead_max"], "<=", "x inicial"),
         ("frações ancoradas", m["fracao_frames_ancorado"],
          CRITERIOS["fracao_frames_ancorado_min"], ">=", ""),
     ]
@@ -262,7 +323,8 @@ def main():
         print("     Próximo passo: ternário completo (PRosettaC/AF3) e MD nível (iii).")
     else:
         print("  -> CANDIDATO REPROVADO no nível (ii).")
-        if m["contatos_warhead_media"] > CRITERIOS["contatos_warhead_max"]:
+        if (m["razao_warhead"] > CRITERIOS["razao_warhead_max"]
+                or m["crescimento_warhead"] > CRITERIOS["crescimento_warhead_max"]):
             print("     O warhead está interagindo com a PRÓPRIA E3 ligase na")
             print("     ausência da PCSK9. É orientação improdutiva do linker:")
             print("     no ternário ele competiria com a ligação ao alvo.")

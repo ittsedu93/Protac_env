@@ -447,3 +447,28 @@ inteiro. Roda sozinho, se precisar:
 ```bash
 python scripts/build_index.py --gro neutro.gro --out grupos.ndx
 ```
+
+---
+
+## Antes de analisar a MD: desfazer a PBC
+
+A proteína tem **5 cadeias** depois dos cortes nas lacunas do cristal
+(`split_chain_gaps.py`), e o GROMACS envolve cada molécula independentemente na
+caixa periódica. Sem tratamento, segmentos da mesma proteína aparecem em lados
+opostos da caixa e o RMSD mede a aresta da caixa, não o movimento:
+
+```
+RMSD da proteína  30.00 Å      <- impossível para uma proteína enovelada
+frações ancoradas  1.00        <- e incompatível com a linha de cima
+```
+
+A contradição entre as duas linhas é a assinatura. O `md_analyze.py` se recusa
+a emitir veredito acima de 10 Å por isso.
+
+```bash
+bash scripts/md_fix_pbc.sh $PIPELINE_OUT/md      # minutos, sem GPU
+python scripts/md_analyze.py --md-dir $PIPELINE_OUT/md
+```
+
+Gera `solutos.xtc` + `solutos.gro` por réplica (5.934 átomos em vez de
+111.809), que a análise prefere automaticamente quando existem.

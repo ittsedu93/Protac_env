@@ -1037,11 +1037,46 @@ acontece.
 
 `md_analyze.py` aplica critérios explícitos, em `CRITERIOS`:
 
+### Antes de qualquer critério: desfazer a PBC
+
+Ao cortar as 4 lacunas do cristal, a proteína deixou de ser **uma** molécula e
+virou **cinco**. O GROMACS envolve cada molécula independentemente na caixa
+periódica, então segmentos da mesma proteína aparecem em lados opostos da
+caixa. Qualquer RMSD calculado sobre isso mede a **aresta da caixa**:
+
+```
+RMSD da proteína  30.00 Å      <- impossível para uma proteína enovelada
+frações ancoradas  1.00        <- e incompatível com a linha de cima
+```
+
+A contradição entre as duas linhas é a assinatura do artefato, e é por isso que
+`md_analyze.py` hoje **se recusa a emitir veredito** com RMSD acima de 10 Å.
+`md_fix_pbc.sh` aplica a receita padrão — `-pbc cluster` para juntar os solutos
+na mesma imagem, `-pbc nojump` para impedir saltos entre quadros — e guarda só
+proteína + ligante (5.934 átomos em vez de 111.809).
+
+### Os critérios do veredito
+
+Os contatos são contados como **pares de átomos** a menos de 4,5 Å. Um fragmento
+ancorado na superfície de uma proteína tem **centenas** desses pares, então
+cortes absolutos não significam nada — a primeira versão usava 20 e 15, e 15
+pares seria exigir que a warhead flutuasse no vácuo. Os critérios são
+**relativos**: ao frame inicial, que é a geometria validada pelo docking, e ao
+próprio recrutador, que dá a escala do que é "muito contato com a E3" nesta
+molécula e neste sistema.
+
 | Critério | Corte | Por quê |
 |---|---|---|
-| RMSD da proteína (CA) | ≤ 3,5 Å | acima disso o sistema não equilibrou, e nada mais no resultado significa algo |
+| RMSD da proteína (CA) | ≤ 3,5 Å | acima disso o sistema não equilibrou, e nada mais significa algo |
 | RMSD do PROTAC | ≤ 5,0 Å | generoso de propósito: o PROTAC **é** flexível; o que não pode é o recrutador sair |
-| contatos do recrutador | mantidos | é o que a MD existe para medir |
+| ancoragem do recrutador | ≥ 0,5 × inicial | metade dos contatos de partida mantida |
+| warhead / recrutador | ≤ 1,0 | a warhead não pode engajar a E3 tanto quanto o recrutador, que foi **desenhado** para isso |
+| crescimento warhead–E3 | ≤ 2,0 × inicial | ela engajou mais do que engajava no início? |
+| frações ancoradas | ≥ 0,7 | não escapou e voltou |
+
+O quarto critério é o que o nível (ii) existe para detectar: se a warhead gruda
+na **própria** E3 na ausência da PCSK9, a orientação do linker é improdutiva —
+no ternário ela competiria com a ligação ao alvo.
 
 Reprovando, a fila da fase 7 já tem o próximo: `MD_RANK=2` e relançar.
 
@@ -1191,6 +1226,9 @@ propósito: esta lista é a parte transferível do trabalho.
 | 21 | NVT estourava mesmo com a cadeia sã | minimização com vínculos e água rígida; NVT partindo a 310 K com Nose-Hoover e dt = 2 fs | `-DFLEXIBLE` + `em2` + equilíbrio em degraus com V-rescale |
 | 22 | `nstxout-compressed = 1e8` | reusei a função que converte **ns** em passos para um valor em **ps** | duas funções, com a unidade no nome |
 | 23 | réplica 2 falharia por `npt.cpt` ausente | `-t` exigido para um conteúdo que ia ser descartado | `-t` condicional + `npt.gro` recuperável de um `prod.tpr` |
+| 24 | `Your tpx version is 138` | o `.tpr` do GROMACS 2026 é novo demais para o `TPRParser` do MDAnalysis | cascata de topologia: `.tpr` → `prod.gro` → `npt.gro` → conversão pelo `gmx` |
+| 25 | **RMSD da proteína = 30 Å** com "frações ancoradas = 1,00" | os cortes nas lacunas fizeram da proteína 5 moléculas, envolvidas separadamente pela caixa periódica | `md_fix_pbc.sh` + recusa de emitir veredito acima de 10 Å |
+| 26 | "interação espúria" onde não havia | corte absoluto de 15 **pares de átomos** para contatos warhead–E3, nunca calibrado | critérios **relativos** ao frame inicial e ao próprio recrutador |
 
 ## O padrão
 
@@ -1207,6 +1245,13 @@ ligação peptídica de 1,4 nm criada quinze minutos antes, cujo aviso
 (`Long Bond`) estava na tela e foi lido como ruído. Hoje `explain_lincs.py`
 traduz os índices em nomes de resíduo, e o `md_run.sh` repete o bloco de erro
 no fim do log, onde quem roda `tail` o vê.
+
+**Número impossível é bug, não descoberta.** Uma proteína enovelada não se
+move 30 Å em 200 ns, e "ancorado em 100% dos frames" não convive com isso. Duas
+saídas que se contradizem são sinal de artefato, e o pipeline hoje **para**
+antes de emitir veredito em vez de reprovar um candidato por causa da aresta da
+caixa periódica. O mesmo vale para limiares: um corte que nunca foi comparado
+com dado real não é critério, é chute com aparência de critério.
 
 **Escrever código contra a mensagem que se tem à mão, não contra a que a
 ferramenta produz.** Os obstáculos 18, 19 e 22 são meus, e todos dessa forma.
@@ -1290,6 +1335,7 @@ md(r"""
 | `build_index.py` | grupos de acoplamento descobertos e **verificados** |
 | `md_run.sh` | acpype → topologia → solvatação → equilíbrio em degraus → produção |
 | `explain_lincs.py` | traduz índices do LINCS em nomes de resíduo |
+| `md_fix_pbc.sh` | desfaz a condição periódica antes da análise |
 | `md_analyze.py` | RMSD, contatos, veredito contra critérios explícitos |
 
 ## Autotestes
@@ -1347,7 +1393,8 @@ para você conferir que nada divergiu.
 | equilíbrio | `em` (emtol 1000, `-DFLEXIBLE`) → `em2` (emtol 100) → `warm` 20 ps @ 0,5 fs → `nvt` 100 ps @ 1 fs → `npt` 5 ns @ 2 fs, **V-rescale**, soluto restrito |
 | produção | **200 ns × 3 réplicas**, dt 2 fs, **Nose-Hoover** τ 1,0 ps @ 310 K, **Parrinello-Rahman** τ 2,0 ps @ 1 bar |
 | amostragem | 1000 frames por réplica (um a cada 200 ps) |
-| critérios de aprovação | RMSD CA ≤ 3,5 Å · RMSD PROTAC ≤ 5,0 Å · contatos do recrutador mantidos |
+| tratamento de PBC | `-pbc cluster` + `-pbc nojump` sobre proteína + ligante, obrigatório por a proteína ser 5 moléculas |
+| critérios de aprovação | RMSD CA ≤ 3,5 Å · RMSD PROTAC ≤ 5,0 Å · ancoragem ≥ 0,5× inicial · warhead/recrutador ≤ 1,0 · crescimento warhead ≤ 2,0× inicial · frações ancoradas ≥ 0,7 |
 | reparos no receptor | 15 cadeias laterais reconstruídas (→ 0 incompletas) · 4 quebras de cadeia nas lacunas, todas a > 16 Å do sítio |
 """)
 
