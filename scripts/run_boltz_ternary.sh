@@ -150,10 +150,28 @@ fi
 # 5 amostras cabem (com folga apertada, já avisando OOM). Então amostra-se em
 # LOTES de 5, cada um no seu diretório e com semente própria — mesma memória,
 # mais amostras, e a estatística que a pergunta exige.
+# Amostrar mais NÃO é pedir um lote maior. 20 amostras de uma vez estouraram
+# a memória da placa e o processo morreu depois de 10 minutos parado em 0%;
+# 5 amostras cabem. Então amostra-se em LOTES de 5, cada um no seu diretório e
+# com semente própria — mesmo pico de memória, mais amostras.
+#
+# Os kernels do cuequivariance são sondados UMA vez, no começo, e a decisão
+# vale para TODOS os lotes. Pôr o fallback só no primeiro lote deixaria os
+# demais morrerem com o mesmo ImportError e sem retry — e a falha seria
+# silenciosa, porque cada lote escreve no seu próprio diretório.
 RUNNER="$DIR/.boltz_run.sh"
 {
   echo '#!/usr/bin/env bash'
   echo 'set -uo pipefail'
+  if [[ "$TEM_NO_KERNELS" == "1" ]]; then
+    printf 'NK=""\n'
+    printf 'if ! conda run -n %q python -c "import cuequivariance_ops_torch" 2>/dev/null; then\n' "$ENV_BOLTZ"
+    printf '  echo "=== cuequivariance_ops_torch ausente: todos os lotes com --no_kernels ==="\n'
+    printf '  NK="--no_kernels"\n'
+    printf 'fi\n'
+  else
+    printf 'NK=""\n'
+  fi
   for ((lote=1; lote<=N_LOTES; lote++)); do
     if [[ "$N_LOTES" -gt 1 ]]; then
       saida="$DIR/lote_$lote"
@@ -163,27 +181,14 @@ RUNNER="$DIR/.boltz_run.sh"
       saida="$DIR"
     fi
     linha=()
-    for x in "${CMD[@]}"; do
-      linha+=("$x")
-    done
-    # troca o out_dir pelo do lote
+    for x in "${CMD[@]}"; do linha+=("$x"); done
     for i in "${!linha[@]}"; do
       if [[ "${linha[$i]}" == "$DIR" ]]; then linha[$i]="$saida"; fi
     done
     [[ "$TEM_SEED" == "1" ]] && linha+=(--seed "$((1000 + lote * 97))")
     printf 'conda run -n %q ' "$ENV_BOLTZ"
     printf '%q ' "${linha[@]}"
-    echo
-    if [[ "$TEM_NO_KERNELS" == "1" && "$lote" -eq 1 ]]; then
-      echo 'codigo=$?'
-      echo 'if [[ $codigo -ne 0 ]] && grep -qi "cuequivariance\|triangle_multiplicative" "'"$DIR"'/boltz.log"; then'
-      echo '  echo "=== kernels do cuequivariance ausentes; repetindo com --no_kernels ==="'
-      echo '  USAR_NO_KERNELS=1'
-      printf '  conda run -n %q ' "$ENV_BOLTZ"
-      printf '%q ' "${linha[@]}"
-      printf -- '--no_kernels\n'
-      echo 'fi'
-    fi
+    printf '$NK\n'
   done
 } > "$RUNNER"
 chmod +x "$RUNNER"
