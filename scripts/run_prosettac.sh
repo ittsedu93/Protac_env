@@ -120,6 +120,29 @@ for head in $HEADS; do
   i=$((i+1))
 done
 
+# A âncora é CALCULÁVEL a partir do head e do PROTAC, então conferi-la é
+# obrigação e não cortesia: quando ela está errada, o PRosettaC não diz
+# "âncora errada" — o translate_anchors devolve -1 e o erro aparece trinta
+# linhas adiante como índice negativo num GetAtomPosition.
+if python "$AQUI/prosettac_anchors.py" --dir . --config "$CFG_NOME" \
+     > .ancoras.out 2>&1; then
+  if grep -q "DIFERENTE" .ancoras.out; then
+    echo
+    grep -E "âncora =|linha correta" .ancoras.out | sed 's/^/  /'
+    echo
+    echo "*** a âncora do config não é o átomo que liga o head ao linker."
+    echo "*** Corrija com:"
+    echo "***   python $AQUI/prosettac_anchors.py --dir $DIR --aplicar"
+    rm -f .ancoras.out
+    exit 1
+  fi
+  grep -E "âncora =" .ancoras.out | sed 's/^/  /'
+else
+  echo "  [aviso] não consegui calcular as âncoras (RDKit ausente?);"
+  echo "          seguindo com o valor do config, por sua conta"
+fi
+rm -f .ancoras.out
+
 if [[ $falhou -ne 0 ]]; then
   echo
   echo "*** corrija o $CFG_NOME antes de lançar:"
