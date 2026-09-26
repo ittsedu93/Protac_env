@@ -68,7 +68,7 @@ fi
 
 OPCOES=()
 for flag in --out_dir --use_msa_server --output_format --diffusion_samples \
-            --no_kernels; do
+            --no_kernels --override; do
   if grep -q -- "$flag" <<< "$AJUDA"; then
     OPCOES+=("$flag")
   else
@@ -84,9 +84,31 @@ for flag in "${OPCOES[@]}"; do
     --output_format)      CMD+=(--output_format pdb) ;;
     --diffusion_samples)  CMD+=(--diffusion_samples "$N_AMOSTRAS") ;;
     --no_kernels)         TEM_NO_KERNELS=1 ;;
+    --override)           TEM_OVERRIDE=1 ;;
   esac
 done
 TEM_NO_KERNELS="${TEM_NO_KERNELS:-0}"
+TEM_OVERRIDE="${TEM_OVERRIDE:-0}"
+
+# Havendo predição anterior, o Boltz PULA em vez de refazer:
+#     Found some existing predictions (1), skipping and running only the
+#     missing ones, if any.
+# Numa repetição isso é o contrário do que se quer — a repetição existe
+# justamente para ver se a geometria se reproduz.
+if compgen -G "$DIR/boltz_results_*/predictions/*/confidence_*.json" > /dev/null; then
+  n_ant=$(ls "$DIR"/boltz_results_*/predictions/*/confidence_*.json 2>/dev/null | wc -l)
+  if [[ "$TEM_OVERRIDE" == "1" ]]; then
+    echo "  já há $n_ant predição(ões); --override vai refazer"
+    echo "  (melhor_ternario.pdb e ranking_poses.csv ficam fora dessa pasta"
+    echo "   e não se perdem)"
+    CMD+=(--override)
+  else
+    echo "*** já há $n_ant predição(ões) e esta versão não tem --override."
+    echo "*** Apague a pasta de resultados antes de repetir:"
+    echo "***   rm -rf $DIR/boltz_results_*"
+    exit 1
+  fi
+fi
 
 echo "  comando: conda run -n $ENV_BOLTZ ${CMD[*]}"
 echo
