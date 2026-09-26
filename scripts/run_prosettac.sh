@@ -107,12 +107,14 @@ if grep -qiE "não associada|unbound variable" "$DIR/run_prosettac.log" 2>/dev/n
 fi
 
 if pgrep -f "prosetta_config.txt" > /dev/null \
-   || squeue -u "$USER" 2>/dev/null | grep -q . \
+   || squeue -h -u "$USER" 2>/dev/null | grep -q . \
    || [[ -d "$DIR/Patchdock_Results" ]]; then
   echo "  rodando — pode desligar o notebook"
   squeue -u "$USER" 2>/dev/null | head -5 | sed 's/^/      /'
 else
-  echo "  [ATENÇÃO] nada rodando e o log está vazio."
+  echo "  [NÃO ESTÁ RODANDO] log completo:"
+  sed 's/^/      /' "$DIR/run_prosettac.log" 2>/dev/null | head -30
+  echo
   echo "  O PRosettaC submete a um gerenciador de filas; o config pede SLURM."
   echo "  Se esta máquina não tem SLURM, ele não tem onde submeter:"
   command -v sbatch > /dev/null \
