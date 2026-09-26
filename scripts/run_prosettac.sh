@@ -77,6 +77,17 @@ if [[ -d "$DIR/Results" || -d "$DIR/results" ]]; then
 fi
 
 cd "$DIR"
+
+# O run_prosettac.sh do PRosettaC roda com `set -euo pipefail` e faz
+# `conda activate prosettac`. Isso dispara o hook de DESATIVAÇÃO do env que
+# estiver ativo, e o mpivars.deactivate.sh do mdtools referencia SETVARS_CALL
+# sem defini-la:
+#     mpivars.deactivate.sh: linha 16: SETVARS_CALL: variável não associada
+# Sob `set -u` é erro; sob `set -e`, mata o script antes da primeira linha de
+# trabalho — o log fica com essa única linha e a fila, vazia. Definir a
+# variável (vazia) basta para o hook passar.
+export SETVARS_CALL="${SETVARS_CALL:-}"
+
 echo "[$(date -Is)] lançando..."
 setsid "$PROSETTAC/run_prosettac.sh" "$DIR" prosetta_config.txt \
     > "$DIR/run_prosettac.log" 2>&1 &
@@ -85,8 +96,21 @@ sleep 8
 
 # O setsid forka, então $! não é o processo final e um pgrep pelo comando
 # completo erra. Quem responde "está vivo?" é o log crescer.
-if pgrep -f "prosetta_config.txt" > /dev/null || [[ -s "$DIR/run_prosettac.log" ]]; then
+# Um log que só tem o aviso do hook do conda significa que o script morreu ali.
+if grep -qiE "não associada|unbound variable" "$DIR/run_prosettac.log" 2>/dev/null \
+   && [[ $(wc -l < "$DIR/run_prosettac.log") -le 3 ]]; then
+  echo "  [FALHOU] o script do PRosettaC morreu no `conda activate`:"
+  sed 's/^/      /' "$DIR/run_prosettac.log"
+  echo "  Uma variável sem valor num hook do conda, sob `set -eu`."
+  echo "  Contorno já aplicado (SETVARS_CALL) não bastou — me mande este log."
+  exit 1
+fi
+
+if pgrep -f "prosetta_config.txt" > /dev/null \
+   || squeue -u "$USER" 2>/dev/null | grep -q . \
+   || [[ -d "$DIR/Patchdock_Results" ]]; then
   echo "  rodando — pode desligar o notebook"
+  squeue -u "$USER" 2>/dev/null | head -5 | sed 's/^/      /'
 else
   echo "  [ATENÇÃO] nada rodando e o log está vazio."
   echo "  O PRosettaC submete a um gerenciador de filas; o config pede SLURM."
