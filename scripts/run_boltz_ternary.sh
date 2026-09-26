@@ -35,7 +35,13 @@ echo "=============================================================="
 echo "Boltz-2 — complexo ternário — $CAND"
 echo "=============================================================="
 grep -c "protein:" "$YAML" | xargs echo "  cadeias de proteína:"
-echo "  amostras pedidas: $N_AMOSTRAS"
+if [[ "$N_LOTES" -gt 1 ]]; then
+  echo "  amostras: $N_AMOSTRAS por lote x $N_LOTES lotes = "\
+       "$((N_AMOSTRAS * N_LOTES)) no total"
+  echo "  (lotes sequenciais: mesmo pico de memória, mais amostras)"
+else
+  echo "  amostras pedidas: $N_AMOSTRAS"
+fi
 echo
 
 # --- a GPU responde? -------------------------------------------------------
@@ -117,7 +123,12 @@ if compgen -G "$DIR/boltz_results_*/predictions/*/confidence_*.json" > /dev/null
 fi
 fi
 
-echo "  comando: conda run -n $ENV_BOLTZ ${CMD[*]}"
+if [[ "$N_LOTES" -gt 1 ]]; then
+    echo "  comando base (o out_dir vira lote_N em cada lote):"
+    echo "    conda run -n $ENV_BOLTZ ${CMD[*]}"
+  else
+    echo "  comando: conda run -n $ENV_BOLTZ ${CMD[*]}"
+  fi
 echo
 if grep -q -- "--use_msa_server" <<< "$AJUDA"; then
   echo "  NOTA: --use_msa_server envia as sequências ao servidor de MSA do"
@@ -176,6 +187,14 @@ RUNNER="$DIR/.boltz_run.sh"
   done
 } > "$RUNNER"
 chmod +x "$RUNNER"
+
+n_exec=$(grep -c "^conda run" "$RUNNER")
+echo "  o runner tem $n_exec execução(ões) do boltz"
+if [[ "$N_LOTES" -gt 1 && "$n_exec" -lt "$N_LOTES" ]]; then
+  echo "*** esperava $N_LOTES e o runner tem $n_exec — os lotes não engataram."
+  echo "*** veja $RUNNER"
+  exit 1
+fi
 
 setsid bash "$RUNNER" > "$DIR/boltz.log" 2>&1 &
 disown -a
