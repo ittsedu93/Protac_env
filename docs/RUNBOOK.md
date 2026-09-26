@@ -472,3 +472,36 @@ python scripts/md_analyze.py --md-dir $PIPELINE_OUT/md
 
 Gera `solutos.xtc` + `solutos.gro` por réplica (5.934 átomos em vez de
 111.809), que a análise prefere automaticamente quando existem.
+
+---
+
+## Resultados para publicação
+
+Depois do veredito, três scripts produzem o material de figura, estrutura e
+filme. Todos em inglês, e todos só leem o disco.
+
+```bash
+conda activate mdtools
+MD=$PIPELINE_OUT/md
+
+python scripts/md_figures.py --md-dir $MD              # figuras + CSV de dados-fonte
+python scripts/md_export_structures.py --md-dir $MD    # PDB representativo + quadros
+bash   scripts/md_movie.sh $MD rep1 12                 # filme .mp4 de 12 s
+```
+
+| Saída | O que é |
+|---|---|
+| `figures/fig1_rmsd.*` | RMSD vs tempo: sítio, núcleo, proteína inteira (painéis com o mesmo eixo y) |
+| `figures/fig2_rmsf.*` | RMSF por resíduo, sítio sombreado, cortes de cadeia marcados |
+| `figures/fig3_contacts.*` | contatos recrutador–E3 e warhead–E3 vs tempo |
+| `figures/fig4_protac.*` | RMSD do PROTAC vs tempo |
+| `figures/*.csv` | **dados-fonte de cada painel** |
+| `structures/final_complex_<rep>.pdb` | o quadro representativo da segunda metade |
+| `structures/movie_<rep>.pdb` | multi-modelo para o filme |
+| `structures/<rep>_trajectory.mp4` | o filme |
+
+PNG e PDF a 300 dpi. Cada figura sai com o CSV ao lado: uma figura cujos dados
+ninguém pode replotar é uma imagem, não um resultado.
+
+**Nomenclatura.** O sistema simulado é o complexo **binário E3–PROTAC**
+(CRBN + recrutador-linker-warhead). Não é ternário: a PCSK9 não está nele.
