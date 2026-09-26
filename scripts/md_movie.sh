@@ -59,7 +59,24 @@ movie encode "$SAIDA" framerate $FPS quality high
 exit
 CX
 
-"$CHIMERAX" --nogui --exit "$CXC" > "$EST/movie_${REP}.log" 2>&1
+# --offscreen liga renderização por software. Sem ela, `--nogui` não
+# inicializa OpenGL e o `movie record` grava zero quadros:
+#     RuntimeError: running without graphics
+#     Movie encoding failed because no images were recorded.
+# Não é falta de codec — é falta de contexto gráfico.
+"$CHIMERAX" --offscreen --nogui --exit "$CXC" > "$EST/movie_${REP}.log" 2>&1
+if [[ ! -s "$SAIDA" ]] && grep -q "running without graphics\|offscreen" \
+     "$EST/movie_${REP}.log" 2>/dev/null; then
+  echo "      --offscreen não funcionou nesta build; tentando via Xvfb"
+  if command -v xvfb-run > /dev/null; then
+    xvfb-run -a "$CHIMERAX" --nogui --exit "$CXC" \
+        >> "$EST/movie_${REP}.log" 2>&1
+  else
+    echo "      xvfb-run não está instalado. Instale com:"
+    echo "        sudo apt install xvfb"
+  fi
+fi
+
 if [[ -s "$SAIDA" ]]; then
   echo "OK — $SAIDA ($(du -h "$SAIDA" | cut -f1))"
   rm -f "$CXC"
