@@ -169,6 +169,33 @@ def descobrir_resname(u, pedido: str) -> str:
         f"ligante: {nomes}. Rode com --resname <nome>.")
 
 
+def bordas_de_corte(u, margem: int = 2):
+    """Resíduos nas pontas da cadeia e junto aos cortes feitos nas lacunas.
+
+    `split_chain_gaps.py` cortou a cadeia nas 4 lacunas do cristal, e cada
+    corte criou dois términos. São **8 términos artificiais** que não existem
+    na proteína real: livres, sem o resto da alça para segurá-los, e pontas
+    soltas dominam o RMSD de CA. Medir RMSD global sobre isso é medir em parte
+    a nossa própria cirurgia, não a estabilidade do complexo.
+
+    Os cortes são achados pela geometria, como em split_chain_gaps.py: C do
+    resíduo i a mais de 2,5 Å do N do i+1 não é ligação peptídica, é corte.
+    """
+    u.trajectory[0]
+    residuos = u.select_atoms("protein").residues
+    bordas = {residuos[0].resid, residuos[-1].resid}
+    for i in range(len(residuos) - 1):
+        c = residuos[i].atoms.select_atoms("name C")
+        n = residuos[i + 1].atoms.select_atoms("name N")
+        if len(c) == 0 or len(n) == 0:
+            continue
+        if float(np.linalg.norm(c.positions[0] - n.positions[0])) > 2.5:
+            for j in range(max(0, i - margem + 1),
+                           min(len(residuos), i + margem + 1)):
+                bordas.add(int(residuos[j].resid))
+    return sorted(bordas)
+
+
 def analisar_replica(u, resname: str):
     from MDAnalysis.analysis import rms
     from MDAnalysis.analysis.distances import distance_array
@@ -181,6 +208,20 @@ def analisar_replica(u, resname: str):
     R = rms.RMSD(u, select="protein and name CA", ref_frame=0)
     R.run()
     rmsd_prot = R.results.rmsd[:, 2]
+
+    # O mesmo RMSD, mas sem os términos artificiais criados pelos cortes.
+    # É este que diz se o complexo é estável; o global acima fica como
+    # contexto, porque a diferença entre os dois é informação.
+    bordas = bordas_de_corte(u)
+    sel_nucleo = ("protein and name CA and not resid "
+                  + " ".join(str(r) for r in bordas))
+    n_nucleo = len(u.select_atoms(sel_nucleo))
+    if n_nucleo > 0:
+        Rn = rms.RMSD(u, select=sel_nucleo, ref_frame=0)
+        Rn.run()
+        rmsd_nucleo = Rn.results.rmsd[:, 2]
+    else:
+        rmsd_nucleo = rmsd_prot
 
     Rl = rms.RMSD(u, select=f"resname {resname}",
                   groupselections=[f"resname {resname}"], ref_frame=0)
@@ -213,6 +254,10 @@ def analisar_replica(u, resname: str):
         "n_frames": len(rmsd_prot),
         "rmsd_proteina_media": float(np.mean(rmsd_prot)),
         "rmsd_proteina_final": float(rmsd_prot[-1]),
+        "rmsd_nucleo_media": float(np.mean(rmsd_nucleo)),
+        "rmsd_nucleo_final": float(rmsd_nucleo[-1]),
+        "n_residuos_borda": len(bordas),
+        "n_residuos_nucleo": int(n_nucleo),
         "rmsd_protac_media": float(np.mean(rmsd_lig)),
         "rmsd_protac_final": float(rmsd_lig[-1]),
         "contatos_recrutador_inicial": float(c_rec[0]),
@@ -261,7 +306,8 @@ def main():
         r["replica"] = rep
         linhas.append(r)
         print(f"  [{rep}] {r['n_frames']} frames | "
-              f"RMSD prot {r['rmsd_proteina_media']:.2f} Å | "
+              f"RMSD prot {r['rmsd_proteina_media']:.2f} Å "
+              f"(núcleo {r['rmsd_nucleo_media']:.2f}) | "
               f"RMSD PROTAC {r['rmsd_protac_media']:.2f} Å | "
               f"contatos recrut {r['contatos_recrutador_media']:.0f} "
               f"(ret. {r['retencao_recrutador']:.2f}x) / "
@@ -296,8 +342,12 @@ def main():
         raise SystemExit("\n  veredito NÃO emitido: a trajetória precisa de "
                          "correção de PBC antes de significar alguma coisa.")
 
+    print(f"  contexto: RMSD de TODOS os CA = {m['rmsd_proteina_media']:.2f} Å "
+          f"| {df['n_residuos_borda'].iloc[0]} resíduos de borda excluídos "
+          f"({df['n_residuos_nucleo'].iloc[0]} no núcleo)\n")
+
     checks = [
-        ("RMSD da proteína", m["rmsd_proteina_media"],
+        ("RMSD do núcleo estruturado", m["rmsd_nucleo_media"],
          CRITERIOS["rmsd_proteina_max_A"], "<=", "Å"),
         ("RMSD do PROTAC", m["rmsd_protac_media"],
          CRITERIOS["rmsd_protac_max_A"], "<=", "Å"),
