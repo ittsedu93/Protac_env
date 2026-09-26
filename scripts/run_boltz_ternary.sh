@@ -37,6 +37,27 @@ grep -c "protein:" "$YAML" | xargs echo "  cadeias de proteína:"
 echo "  amostras pedidas: $N_AMOSTRAS"
 echo
 
+# --- a GPU responde? -------------------------------------------------------
+# O nvidia-smi usa a NVML, que é a biblioteca de GERENCIAMENTO. Ela pode estar
+# desalinhada com o módulo do kernel (depois de um apt upgrade sem reboot)
+# enquanto a API do CUDA continua funcionando. Quem decide é um contexto CUDA
+# de verdade, não o nvidia-smi — e descobrir isso em 10 segundos é melhor que
+# descobrir depois de 40 minutos de fila.
+CUDA=$(conda run -n "$ENV_BOLTZ" python -c \
+  "import torch; print(torch.cuda.is_available())" 2>/dev/null | tail -1)
+if [[ "$CUDA" != "True" ]]; then
+  echo "*** o CUDA não está disponível no env $ENV_BOLTZ (torch: '$CUDA')."
+  echo "*** Se o nvidia-smi também falha com 'Driver/library version"
+  echo "*** mismatch', o módulo do kernel e as bibliotecas estão em versões"
+  echo "*** diferentes — só um reboot alinha, e ele precisa de root."
+  echo "***"
+  echo "*** Peça a quem administra a máquina. Enquanto isso, o PRosettaC não"
+  echo "*** usa GPU e pode rodar:"
+  echo "***   bash $(dirname "$0")/run_prosettac.sh $CAND"
+  exit 1
+fi
+echo "  CUDA disponível"
+
 # --- conferir as flags contra a versão instalada --------------------------
 AJUDA=$(conda run -n "$ENV_BOLTZ" boltz predict --help 2>&1)
 if [[ -z "$AJUDA" ]] || grep -qi "not found\|No such" <<< "$AJUDA"; then
