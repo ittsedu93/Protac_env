@@ -20,10 +20,16 @@ PROSETTAC="${PROSETTAC_DIR:-/mnt/hd2tb/Documentos/PRosettaC}"
 
 CAND="${1:?uso: run_prosettac.sh <candidate_id> [--lote]}"
 LOTE="${2:-}"
-# A fase 6 escreve os jobs em $PIPELINE_OUT/wp3/<candidato> (o --outdir do
-# wp3_assemble_protacs.py), não na raiz do pipeline.
-DIR="$OUT/wp3/$CAND"
-[[ -d "$DIR" ]] || DIR="$OUT/$CAND"
+# Onde a fase 6 escreveu os jobs é coisa que se PROCURA, não que se adivinha:
+# já errei este caminho duas vezes seguidas supondo o layout em vez de olhar.
+# O arquivo que importa é o prosetta_config.txt do candidato; achá-lo pelo
+# nome funciona em qualquer layout, hoje e depois de qualquer refatoração.
+DIR=""
+while IFS= read -r achado; do
+  DIR="$(dirname "$achado")"; break
+done < <(find "$OUT" -maxdepth 5 -type f -name prosetta_config.txt \
+             -path "*/$CAND/*" 2>/dev/null | sort)
+[[ -n "$DIR" ]] || DIR="$OUT/wp3/prosettac/$CAND"
 
 [[ -d "$PROSETTAC" ]] || { echo "não achei o PRosettaC em $PROSETTAC"; exit 1; }
 [[ -x "$PROSETTAC/run_prosettac.sh" ]] || {
@@ -31,8 +37,11 @@ DIR="$OUT/wp3/$CAND"
 [[ -s "$DIR/prosetta_config.txt" ]] || {
   echo "não achei $DIR/prosetta_config.txt"
   echo "ele é escrito pela fase 6 (wp3_assemble_protacs.py)."
-  echo "Candidatos com job emitido:"
-  ls -1 "$OUT/wp3" 2>/dev/null | sed 's/^/    /' | head -20
+  echo
+  echo "Candidatos com job emitido (procurados por prosetta_config.txt):"
+  find "$OUT" -maxdepth 5 -type f -name prosetta_config.txt 2>/dev/null \
+    | sed 's|/prosetta_config.txt$||' | xargs -r -n1 basename \
+    | sort -u | sed 's/^/    /' | head -20
   exit 1; }
 
 echo "=============================================================="
@@ -80,5 +89,5 @@ if [[ "$LOTE" == "--lote" ]]; then
   echo
   echo "*** --lote foi ignorado de propósito nesta execução."
   echo "*** Confira o Anchor atoms deste job PRIMEIRO; depois rode"
-  echo "***   bash $OUT/wp3/launch_all.sh"
+  echo "***   bash $(dirname "$DIR")/launch_all.sh"
 fi
