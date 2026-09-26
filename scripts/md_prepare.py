@@ -173,6 +173,27 @@ def main():
               f"pose do docking, e a MD partiria de uma geometria que a "
               f"triagem não validou")
 
+    # O diretório da MD é fixo, então preparar um candidato NOVO sobre o
+    # diretório de um candidato ANTERIOR faria o laço da produção encontrar
+    # rep1/prod.gro do anterior e pular as réplicas — ficaríamos com o veredito
+    # de um candidato carimbado com o nome de outro.
+    anterior = out / "md_sistema.json"
+    if anterior.exists():
+        try:
+            velho_id = json.loads(anterior.read_text()).get("candidate_id")
+        except Exception:
+            velho_id = None
+        if velho_id and velho_id != cand["candidate_id"]:
+            reps = sorted(d.name for d in out.glob("rep*") if d.is_dir())
+            if reps:
+                raise SystemExit(
+                    f"\n*** {out} já tem a MD de {velho_id} ({', '.join(reps)}).\n"
+                    f"*** Preparar {cand['candidate_id']} aqui faria o laço da\n"
+                    f"*** produção pular as réplicas do candidato anterior e\n"
+                    f"*** carimbar o veredito dele com o nome do novo.\n"
+                    f"*** Guarde a MD anterior antes:\n"
+                    f"***   mv {out} {out}_{velho_id}\n")
+
     lig_sdf = out / "protac.sdf"
     with Chem.SDWriter(str(lig_sdf)) as w:
         w.write(mol)
