@@ -1,169 +1,169 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
-# Dispara o PRosettaC para o candidato aprovado no nível (ii).
+# Dispara o PRosettaC para um candidato.
 #
-#   bash scripts/run_prosettac.sh <candidate_id> [--lote]
+#   bash scripts/run_prosettac.sh <candidate_id>
 #
-# Sem --lote roda UM job e para. Isso é deliberado e está no RUNBOOK desde o
-# começo: a convenção de `Anchor atoms` (0-based vs 1-based) varia por build do
-# PRosettaC, e um lote inteiro com o átomo errado é um lote perdido. O primeiro
-# job existe para conferir isso.
+# A ORDEM aqui é a parte que importa, e cada passo depende do anterior:
 #
-# Retomável: um candidato cujo diretório já tem resultado é pulado.
+#   1. achar o diretório do candidato   (procurando o config, não adivinhando)
+#   2. ENTRAR nele                      (o PRosettaC só trabalha com nomes
+#                                        relativos; tudo depois disto assume
+#                                        que o diretório atual é o de trabalho)
+#   3. trazer as entradas para dentro   (copiar + reescrever o config)
+#   4. limpar restos de tentativa morta (senão o clean_pdb pula a limpeza)
+#   5. validar                          (arquivos, cadeias, âncoras)
+#   6. lançar
+#   7. conferir que subiu               (três sinais, não um)
+#
+# Roda UM job e para. A convenção de `Anchor atoms` (0-based vs 1-based) varia
+# por build, e um lote inteiro com o átomo errado é um lote perdido.
 # ---------------------------------------------------------------------------
 set -uo pipefail
 
-CONF="$(dirname "$0")/../config/pipeline.conf"
+AQUI="$(cd "$(dirname "$0")" && pwd)"
+# O que veio do ambiente ganha do arquivo de configuração: quem passa a
+# variável na linha de comando está dizendo explicitamente o que quer, e é
+# também o que torna este script testável fora da máquina do laboratório.
+_OUT_ENV="${PIPELINE_OUT:-}"
+_PROS_ENV="${PROSETTAC_DIR:-}"
+CONF="$AQUI/../config/pipeline.conf"
 [[ -f "$CONF" ]] && source "$CONF"
-OUT="${PIPELINE_OUT:-$HOME/PRosettaC_runs/vhl_crbn_pcsk9_protac/pipeline}"
-PROSETTAC="${PROSETTAC_DIR:-/mnt/hd2tb/Documentos/PRosettaC}"
+OUT="${_OUT_ENV:-${PIPELINE_OUT:-$HOME/PRosettaC_runs/vhl_crbn_pcsk9_protac/pipeline}}"
+PROSETTAC="${_PROS_ENV:-${PROSETTAC_DIR:-/mnt/hd2tb/Documentos/PRosettaC}}"
+CFG_NOME="prosetta_config.txt"
 
-CAND="${1:?uso: run_prosettac.sh <candidate_id> [--lote]}"
-LOTE="${2:-}"
-# Onde a fase 6 escreveu os jobs é coisa que se PROCURA, não que se adivinha:
-# já errei este caminho duas vezes seguidas supondo o layout em vez de olhar.
-# O arquivo que importa é o prosetta_config.txt do candidato; achá-lo pelo
-# nome funciona em qualquer layout, hoje e depois de qualquer refatoração.
-DIR=""
-while IFS= read -r achado; do
-  DIR="$(dirname "$achado")"; break
-done < <(find "$OUT" -maxdepth 5 -type f -name prosetta_config.txt \
-             -path "*/$CAND/*" 2>/dev/null | sort)
-[[ -n "$DIR" ]] || DIR="$OUT/wp3/prosettac/$CAND"
-
-[[ -d "$PROSETTAC" ]] || { echo "não achei o PRosettaC em $PROSETTAC"; exit 1; }
-[[ -x "$PROSETTAC/run_prosettac.sh" ]] || {
-  echo "não achei $PROSETTAC/run_prosettac.sh (executável)"; exit 1; }
-[[ -s "$DIR/prosetta_config.txt" ]] || {
-  echo "não achei $DIR/prosetta_config.txt"
-  echo "ele é escrito pela fase 6 (wp3_assemble_protacs.py)."
-  echo
-  echo "Candidatos com job emitido (procurados por prosetta_config.txt):"
-  find "$OUT" -maxdepth 5 -type f -name prosetta_config.txt 2>/dev/null \
-    | sed 's|/prosetta_config.txt$||' | xargs -r -n1 basename \
-    | sort -u | sed 's/^/    /' | head -20
-  exit 1; }
+CAND="${1:?uso: run_prosettac.sh <candidate_id>}"
 
 echo "=============================================================="
 echo "PRosettaC — $CAND"
 echo "=============================================================="
+
+# --- 1. achar o diretório do candidato ------------------------------------
+DIR=""
+while IFS= read -r achado; do DIR="$(dirname "$achado")"; break
+done < <(find "$OUT" -maxdepth 5 -type f -name "$CFG_NOME" -path "*/$CAND/*" \
+              2>/dev/null | sort)
+if [[ -z "$DIR" ]]; then
+  echo "não achei $CFG_NOME para $CAND em $OUT"
+  echo
+  echo "Candidatos com job emitido:"
+  find "$OUT" -maxdepth 5 -type f -name "$CFG_NOME" 2>/dev/null \
+    | sed "s|/$CFG_NOME$||" | xargs -r -n1 basename | sort -u \
+    | sed 's/^/    /' | head -20
+  exit 1
+fi
+
+# --- 2. entrar nele: daqui para baixo, tudo é relativo --------------------
+cd "$DIR" || { echo "não consegui entrar em $DIR"; exit 1; }
+echo "  diretório: $DIR"
+
+[[ -x "$PROSETTAC/run_prosettac.sh" ]] || {
+  echo "não achei $PROSETTAC/run_prosettac.sh (executável)"; exit 1; }
+
+# --- 3. trazer as entradas para dentro ------------------------------------
+python "$AQUI/prosettac_localize.py" --dir . --config "$CFG_NOME" || exit 1
+
+# --- 4. limpar restos de uma tentativa que morreu no meio -----------------
+# O clean_pdb vê um <struct>_<cadeia>.pdb existente, pula a limpeza, e o que
+# segue opera sobre um arquivo pela metade.
+rm -f ./*_[A-Z].fasta ./*_[A-Z].pdb ./log.txt
+
 echo
-echo "config que será usado:"
-sed 's/^/    /' "$DIR/prosetta_config.txt"
+echo "config:"
+sed 's/^/    /' "$CFG_NOME"
 echo
 
-# --- conferências antes de gastar horas ------------------------------------
-falta=0
-while read -r chave valores; do
-  case "$chave" in
-    Structures:|Heads:|Protac:)
-      for f in $valores; do
-        if [[ ! -s "$f" ]]; then echo "  [FALTA] $chave $f"; falta=1; fi
-      done ;;
-  esac
-done < "$DIR/prosetta_config.txt"
-[[ $falta -eq 0 ]] || { echo -e "\n*** arquivos de entrada ausentes"; exit 1; }
+# --- 5. validar ------------------------------------------------------------
+falhou=0
 
-# O PRosettaC exige as entradas DENTRO do diretório de trabalho, com nomes
-# relativos. Com caminho absoluto ele se parte ao meio: o clean_pdb escreve o
-# .fasta no diretório atual e o rosetta.py o procura ao lado do PDB de entrada.
-python "$(dirname "$0")/prosettac_localize.py" --dir "$DIR" || exit 1
-echo
+ESTRUTURAS=$(awk -F': ' '/^Structures:/{print $2}' "$CFG_NOME")
+CADEIAS=$(awk -F': ' '/^Chains:/{print $2}' "$CFG_NOME")
+HEADS=$(awk -F': ' '/^Heads:/{print $2}' "$CFG_NOME")
+PROTAC=$(awk -F': ' '/^Protac:/{print $2}' "$CFG_NOME")
+ANCHORS=$(awk -F': ' '/^Anchor atoms:/{print $2}' "$CFG_NOME")
 
-# As CADEIAS existem nas estruturas? O clean_pdb do Rosetta não reclama alto:
-# ele imprime "0 --- --- --- --- BAD", segue, e o erro aparece depois como um
-# .fasta que não existe. Conferir aqui custa um segundo e aponta a causa.
-ESTRUTURAS=$(awk -F': ' '/^Structures:/{print $2}' "$DIR/prosetta_config.txt")
-CADEIAS=$(awk -F': ' '/^Chains:/{print $2}' "$DIR/prosetta_config.txt")
+for f in $ESTRUTURAS $HEADS $PROTAC; do
+  [[ -s "$f" ]] || { echo "  [FALTA] $f"; falhou=1; }
+done
+
 i=1
-erro_cadeia=0
 for est in $ESTRUTURAS; do
   cad=$(echo "$CADEIAS" | cut -d' ' -f$i)
-  presentes=$(awk '/^ATOM/{print substr($0,22,1)}' "$est" | sort -u | tr -d '\n')
-  n=$(awk -v c="$cad" '/^ATOM/ && substr($0,22,1)==c{print substr($0,23,5)}' \
-        "$est" | sort -u | wc -l)
-  if [[ "$n" -eq 0 ]]; then
-    echo "  [CADEIA ERRADA] $(basename "$est"): pediu '$cad', tem '$presentes'"
-    erro_cadeia=1
-  else
-    echo "  cadeia $cad de $(basename "$est"): $n resíduos"
+  if [[ -s "$est" ]]; then
+    presentes=$(awk '/^ATOM/{print substr($0,22,1)}' "$est" | sort -u | tr -d '\n ')
+    n=$(awk -v c="$cad" '/^ATOM/ && substr($0,22,1)==c{print substr($0,23,5)}' \
+          "$est" | sort -u | wc -l)
+    if [[ "$n" -eq 0 ]]; then
+      echo "  [CADEIA ERRADA] $est: pediu '$cad', tem '$presentes'"
+      falhou=1
+    else
+      echo "  cadeia $cad de $est: $n resíduos"
+    fi
   fi
   i=$((i+1))
 done
-if [[ $erro_cadeia -eq 1 ]]; then
+
+# os âncoras têm de existir dentro de cada head
+i=1
+for head in $HEADS; do
+  anc=$(echo "$ANCHORS" | cut -d' ' -f$i)
+  if [[ -s "$head" ]]; then
+    n_at=$(sed -n '4p' "$head" | awk '{print $1+0}')
+    if [[ -n "$anc" && "$n_at" -gt 0 && "$anc" -gt "$n_at" ]]; then
+      echo "  [ÂNCORA FORA] $head tem $n_at átomos, âncora pedida: $anc"
+      falhou=1
+    else
+      echo "  âncora $anc em $head ($n_at átomos)"
+    fi
+  fi
+  i=$((i+1))
+done
+
+if [[ $falhou -ne 0 ]]; then
   echo
-  echo "*** Corrija a linha Chains: do config antes de lançar:"
-  echo "***   nano $DIR/prosetta_config.txt"
+  echo "*** corrija o $CFG_NOME antes de lançar:"
+  echo "***   nano $DIR/$CFG_NOME"
   exit 1
 fi
-echo
 
-ANCHORS=$(awk -F': ' '/^Anchor atoms:/{print $2}' "$DIR/prosetta_config.txt")
+echo
 echo "  Anchor atoms = $ANCHORS"
 echo "  >>> CONFIRA no resultado deste job que os âncoras são os átomos que"
-echo "  >>> ligam cada head ao linker. 0-based vs 1-based varia por build,"
-echo "  >>> e o lote inteiro depende disto."
+echo "  >>> ligam cada head ao linker. 0-based vs 1-based varia por build."
 echo
 
-# Restos de uma tentativa que morreu no meio: o clean_pdb vê o _C.pdb e pula a
-# limpeza, e aí o que segue opera sobre um arquivo pela metade.
-rm -f "$DIR"/*_[A-Z].fasta "$DIR"/*_[A-Z].pdb "$DIR/log.txt"
-
-if [[ -d "$DIR/Results" || -d "$DIR/results" ]]; then
-  echo "  já há resultado em $DIR — nada a fazer"
+# --- 6. já há resultado? ---------------------------------------------------
+if [[ -d Results || -d results ]]; then
+  echo "  já há resultado aqui — nada a fazer"
   exit 0
 fi
 
-cd "$DIR"
-
+# --- 7. lançar -------------------------------------------------------------
 # O run_prosettac.sh do PRosettaC roda com `set -euo pipefail` e faz
-# `conda activate prosettac`. Isso dispara o hook de DESATIVAÇÃO do env que
-# estiver ativo, e o mpivars.deactivate.sh do mdtools referencia SETVARS_CALL
-# sem defini-la:
-#     mpivars.deactivate.sh: linha 16: SETVARS_CALL: variável não associada
-# Sob `set -u` é erro; sob `set -e`, mata o script antes da primeira linha de
-# trabalho — o log fica com essa única linha e a fila, vazia. Definir a
-# variável (vazia) basta para o hook passar.
+# `conda activate`. Isso dispara o hook de DESATIVAÇÃO do env ativo, e o
+# mpivars.deactivate.sh do mdtools referencia SETVARS_CALL sem defini-la —
+# sob `set -eu` isso mata o script antes da primeira linha de trabalho.
 export SETVARS_CALL="${SETVARS_CALL:-}"
 
 echo "[$(date -Is)] lançando..."
-setsid "$PROSETTAC/run_prosettac.sh" "$DIR" prosetta_config.txt \
-    > "$DIR/run_prosettac.log" 2>&1 &
+setsid "$PROSETTAC/run_prosettac.sh" "$DIR" "$CFG_NOME" \
+    > run_prosettac.log 2>&1 &
 disown -a
 sleep 8
 
-# O setsid forka, então $! não é o processo final e um pgrep pelo comando
-# completo erra. Quem responde "está vivo?" é o log crescer.
-# Um log que só tem o aviso do hook do conda significa que o script morreu ali.
-if grep -qiE "não associada|unbound variable" "$DIR/run_prosettac.log" 2>/dev/null \
-   && [[ $(wc -l < "$DIR/run_prosettac.log") -le 3 ]]; then
-  echo "  [FALHOU] o script do PRosettaC morreu no `conda activate`:"
-  sed 's/^/      /' "$DIR/run_prosettac.log"
-  echo "  Uma variável sem valor num hook do conda, sob `set -eu`."
-  echo "  Contorno já aplicado (SETVARS_CALL) não bastou — me mande este log."
-  exit 1
-fi
+# --- 8. conferir que subiu -------------------------------------------------
+vivo=0
+pgrep -f "$CFG_NOME" > /dev/null && vivo=1
+squeue -h -u "${USER:-$(id -un)}" 2>/dev/null | grep -q . && vivo=1
+[[ -d Patchdock_Results ]] && vivo=1
 
-if pgrep -f "prosetta_config.txt" > /dev/null \
-   || squeue -h -u "$USER" 2>/dev/null | grep -q . \
-   || [[ -d "$DIR/Patchdock_Results" ]]; then
-  echo "  rodando — pode desligar o notebook"
-  squeue -u "$USER" 2>/dev/null | head -5 | sed 's/^/      /'
+if [[ $vivo -eq 1 ]]; then
+  echo "  RODANDO — pode desligar o notebook"
+  squeue -h -u "${USER:-$(id -un)}" 2>/dev/null | head -5 | sed 's/^/      /'
+  echo "  log: tail -f $DIR/run_prosettac.log"
 else
-  echo "  [NÃO ESTÁ RODANDO] log completo:"
-  sed 's/^/      /' "$DIR/run_prosettac.log" 2>/dev/null | head -30
-  echo
-  echo "  O PRosettaC submete a um gerenciador de filas; o config pede SLURM."
-  echo "  Se esta máquina não tem SLURM, ele não tem onde submeter:"
-  command -v sbatch > /dev/null \
-    && echo "    sbatch existe: $(command -v sbatch)" \
-    || echo "    sbatch NÃO existe nesta máquina — é provável que seja isso"
-fi
-echo "  log: tail -f $DIR/run_prosettac.log"
-
-if [[ "$LOTE" == "--lote" ]]; then
-  echo
-  echo "*** --lote foi ignorado de propósito nesta execução."
-  echo "*** Confira o Anchor atoms deste job PRIMEIRO; depois rode"
-  echo "***   bash $(dirname "$DIR")/launch_all.sh"
+  echo "  [NÃO SUBIU] log completo:"
+  sed 's/^/      /' run_prosettac.log 2>/dev/null | head -40
+  exit 1
 fi
