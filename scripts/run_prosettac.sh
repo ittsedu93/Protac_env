@@ -64,6 +64,12 @@ while read -r chave valores; do
 done < "$DIR/prosetta_config.txt"
 [[ $falta -eq 0 ]] || { echo -e "\n*** arquivos de entrada ausentes"; exit 1; }
 
+# O PRosettaC exige as entradas DENTRO do diretório de trabalho, com nomes
+# relativos. Com caminho absoluto ele se parte ao meio: o clean_pdb escreve o
+# .fasta no diretório atual e o rosetta.py o procura ao lado do PDB de entrada.
+python "$(dirname "$0")/prosettac_localize.py" --dir "$DIR" || exit 1
+echo
+
 # As CADEIAS existem nas estruturas? O clean_pdb do Rosetta não reclama alto:
 # ele imprime "0 --- --- --- --- BAD", segue, e o erro aparece depois como um
 # .fasta que não existe. Conferir aqui custa um segundo e aponta a causa.
@@ -98,6 +104,10 @@ echo "  >>> CONFIRA no resultado deste job que os âncoras são os átomos que"
 echo "  >>> ligam cada head ao linker. 0-based vs 1-based varia por build,"
 echo "  >>> e o lote inteiro depende disto."
 echo
+
+# Restos de uma tentativa que morreu no meio: o clean_pdb vê o _C.pdb e pula a
+# limpeza, e aí o que segue opera sobre um arquivo pela metade.
+rm -f "$DIR"/*_[A-Z].fasta "$DIR"/*_[A-Z].pdb "$DIR/log.txt"
 
 if [[ -d "$DIR/Results" || -d "$DIR/results" ]]; then
   echo "  já há resultado em $DIR — nada a fazer"
