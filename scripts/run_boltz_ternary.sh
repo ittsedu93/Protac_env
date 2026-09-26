@@ -67,7 +67,8 @@ if [[ -z "$AJUDA" ]] || grep -qi "not found\|No such" <<< "$AJUDA"; then
 fi
 
 OPCOES=()
-for flag in --out_dir --use_msa_server --output_format --diffusion_samples; do
+for flag in --out_dir --use_msa_server --output_format --diffusion_samples \
+            --no_kernels; do
   if grep -q -- "$flag" <<< "$AJUDA"; then
     OPCOES+=("$flag")
   else
@@ -82,8 +83,10 @@ for flag in "${OPCOES[@]}"; do
     --use_msa_server)     CMD+=(--use_msa_server) ;;
     --output_format)      CMD+=(--output_format pdb) ;;
     --diffusion_samples)  CMD+=(--diffusion_samples "$N_AMOSTRAS") ;;
+    --no_kernels)         TEM_NO_KERNELS=1 ;;
   esac
 done
+TEM_NO_KERNELS="${TEM_NO_KERNELS:-0}"
 
 echo "  comando: conda run -n $ENV_BOLTZ ${CMD[*]}"
 echo
@@ -94,9 +97,38 @@ if grep -q -- "--use_msa_server" <<< "$AJUDA"; then
   echo
 fi
 
-setsid conda run -n "$ENV_BOLTZ" "${CMD[@]}" > "$DIR/boltz.log" 2>&1 &
+# Escada de kernels. O Boltz tenta os kernels otimizados da NVIDIA
+# (cuequivariance) para o triangle multiplicative update; não estando
+# instalados ou não casando com o CUDA, ele morre com
+#     ImportError: Error importing triangle_multiplicative_update
+#                  from cuequivariance_ops_torch
+# `--no_kernels` usa a implementação nativa: mais lenta, mesmo resultado.
+# Tentar e cair é melhor que decidir de antemão — quando os kernels existem,
+# eles valem a pena.
+RUNNER="$DIR/.boltz_run.sh"
+{
+  echo '#!/usr/bin/env bash'
+  echo 'set -uo pipefail'
+  printf 'conda run -n %q ' "$ENV_BOLTZ"
+  printf '%q ' "${CMD[@]}"
+  echo
+  if [[ "$TEM_NO_KERNELS" == "1" ]]; then
+    echo 'codigo=$?'
+    echo 'if [[ $codigo -ne 0 ]] && grep -qi "cuequivariance\|triangle_multiplicative" "'"$DIR"'/boltz.log"; then'
+    echo '  echo ""'
+    echo '  echo "=== os kernels do cuequivariance não carregaram; repetindo com --no_kernels ==="'
+    printf '  conda run -n %q ' "$ENV_BOLTZ"
+    printf '%q ' "${CMD[@]}"
+    printf -- '--no_kernels
+'
+    echo 'fi'
+  fi
+} > "$RUNNER"
+chmod +x "$RUNNER"
+
+setsid bash "$RUNNER" > "$DIR/boltz.log" 2>&1 &
 disown -a
-sleep 8
+sleep 10
 if pgrep -f "boltz predict $YAML" > /dev/null; then
   echo "  rodando — pode desligar o notebook"
   echo "  log:    tail -f $DIR/boltz.log"
@@ -105,6 +137,11 @@ else
   echo "*** o Boltz não ficou rodando. Primeiras linhas do log:"
   head -25 "$DIR/boltz.log" 2>/dev/null
   echo
+  if [[ "$TEM_NO_KERNELS" != "1" ]]; then
+    echo "*** Esta versão do boltz não tem --no_kernels. Se o erro for do"
+    echo "*** cuequivariance, o caminho é instalar o pacote:"
+    echo "***   conda run -n $ENV_BOLTZ pip install cuequivariance-ops-torch"
+  fi
   echo "*** Se for memória de GPU, tente menos amostras:"
   echo "***   bash $0 $CAND 1"
   exit 1

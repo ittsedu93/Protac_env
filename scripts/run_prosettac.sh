@@ -81,8 +81,20 @@ echo "[$(date -Is)] lançando..."
 setsid "$PROSETTAC/run_prosettac.sh" "$DIR" prosetta_config.txt \
     > "$DIR/run_prosettac.log" 2>&1 &
 disown -a
-sleep 5
-echo "  PID $(pgrep -f "run_prosettac.sh $DIR" | head -1) — pode desligar o notebook"
+sleep 8
+
+# O setsid forka, então $! não é o processo final e um pgrep pelo comando
+# completo erra. Quem responde "está vivo?" é o log crescer.
+if pgrep -f "prosetta_config.txt" > /dev/null || [[ -s "$DIR/run_prosettac.log" ]]; then
+  echo "  rodando — pode desligar o notebook"
+else
+  echo "  [ATENÇÃO] nada rodando e o log está vazio."
+  echo "  O PRosettaC submete a um gerenciador de filas; o config pede SLURM."
+  echo "  Se esta máquina não tem SLURM, ele não tem onde submeter:"
+  command -v sbatch > /dev/null \
+    && echo "    sbatch existe: $(command -v sbatch)" \
+    || echo "    sbatch NÃO existe nesta máquina — é provável que seja isso"
+fi
 echo "  log: tail -f $DIR/run_prosettac.log"
 
 if [[ "$LOTE" == "--lote" ]]; then
