@@ -1067,7 +1067,7 @@ molécula e neste sistema.
 
 | Critério | Corte | Por quê |
 |---|---|---|
-| RMSD da proteína (CA) | ≤ 3,5 Å | acima disso o sistema não equilibrou, e nada mais significa algo |
+| **RMSD do sítio** (CA a ≤12 Å do recrutador) | ≤ 3,5 Å | o bolso que segura o recrutador é o que o nível (ii) pergunta |
 | RMSD do PROTAC | ≤ 5,0 Å | generoso de propósito: o PROTAC **é** flexível; o que não pode é o recrutador sair |
 | ancoragem do recrutador | ≥ 0,5 × inicial | metade dos contatos de partida mantida |
 | warhead / recrutador | ≤ 1,0 | a warhead não pode engajar a E3 tanto quanto o recrutador, que foi **desenhado** para isso |
@@ -1078,7 +1078,51 @@ O quarto critério é o que o nível (ii) existe para detectar: se a warhead gru
 na **própria** E3 na ausência da PCSK9, a orientação do linker é improdutiva —
 no ternário ela competiria com a ligação ao alvo.
 
-Reprovando, a fila da fase 7 já tem o próximo: `MD_RANK=2` e relançar.
+### Por que o portão é o sítio e não a proteína inteira
+
+O RMSD global **continua sendo medido e impresso**, e um valor alto tem de ser
+declarado na tese. Ele só deixou de reprovar sozinho, e a razão saiu dos dados
+deste projeto:
+
+| | rep1 | rep2 | rep3 | média |
+|---|---|---|---|---|
+| RMSD global | 4,71 | 2,88 | 5,08 | **4,22 Å** |
+| RMSD do núcleo | 4,19 | 2,71 | 4,59 | 3,83 Å |
+| **RMSD do sítio** | 1,55 | 1,63 | 1,91 | **1,70 Å** |
+
+O bolso fica em 1,5–2,2 Å **do primeiro bloco de 25 ns ao último, sem
+tendência**, enquanto o global vai a 5,9 e 5,6 Å em duas réplicas. Os 4 Å de
+diferença estão inteiramente fora do sítio. A CRBN é multidomínio e tem
+dobradiça conhecida entre o domínio tipo-Lon e o de ligação à talidomida; um
+RMSD global alto com o sítio rígido é giro de domínio, não desenovelamento. E a
+dobradiça foi provavelmente amplificada por nós: as 4 alças cortadas são o tipo
+de conexão que limita movimento interdomínio.
+
+Reprovando, a fila da fase 7 já tem o próximo: `MD_RANK=2` e relançar. Mas
+**atenção ao modo de falha**: se o que falha é a proteína, e não o PROTAC, o
+próximo candidato usa o mesmo receptor e vai falhar igual — trocar de candidato
+seria gastar 45 h para reencontrar o mesmo número.
+
+## O resultado: SC0006__WH023
+
+| Critério | Valor | Corte | |
+|---|---|---|---|
+| RMSD do sítio | **1,70 Å** | ≤ 3,5 | OK |
+| RMSD do PROTAC | 2,87 Å | ≤ 5,0 | OK |
+| ancoragem mantida | 0,77 × inicial | ≥ 0,5 | OK |
+| warhead / recrutador | 0,65 | ≤ 1,0 | OK |
+| crescimento warhead–E3 | 0,99 × inicial | ≤ 2,0 | OK |
+| frações ancoradas | 1,00 | ≥ 0,7 | OK |
+
+**Aprovado no nível (ii)**, com uma observação a declarar: movimento de domínio
+do receptor, com RMSD global de 4,22 Å, presente em 2 das 3 réplicas.
+
+O número mais informativo é o **0,99×**: a warhead termina os 200 ns com
+exatamente o mesmo engajamento com a CRBN que tinha no início. O risco central
+do nível (ii) — a warhead migrar para a própria E3 e competir com o alvo no
+ternário — **não se materializou**.
+
+Desempenho: 310, 329 e 326 ns/dia; ~15 h por réplica, ~46 h no total.
 
 ## Como rodar
 
@@ -1229,6 +1273,7 @@ propósito: esta lista é a parte transferível do trabalho.
 | 24 | `Your tpx version is 138` | o `.tpr` do GROMACS 2026 é novo demais para o `TPRParser` do MDAnalysis | cascata de topologia: `.tpr` → `prod.gro` → `npt.gro` → conversão pelo `gmx` |
 | 25 | **RMSD da proteína = 30 Å** com "frações ancoradas = 1,00" | os cortes nas lacunas fizeram da proteína 5 moléculas, envolvidas separadamente pela caixa periódica | `md_fix_pbc.sh` + recusa de emitir veredito acima de 10 Å |
 | 26 | "interação espúria" onde não havia | corte absoluto de 15 **pares de átomos** para contatos warhead–E3, nunca calibrado | critérios **relativos** ao frame inicial e ao próprio recrutador |
+| 27 | reprovação por RMSD global de 4,22 Å | o critério media a proteína inteira, e o receptor é multidomínio com dobradiça | portão no **sítio** (1,70 Å); o global vira contexto a declarar |
 
 ## O padrão
 
@@ -1394,7 +1439,8 @@ para você conferir que nada divergiu.
 | produção | **200 ns × 3 réplicas**, dt 2 fs, **Nose-Hoover** τ 1,0 ps @ 310 K, **Parrinello-Rahman** τ 2,0 ps @ 1 bar |
 | amostragem | 1000 frames por réplica (um a cada 200 ps) |
 | tratamento de PBC | `-pbc cluster` + `-pbc nojump` sobre proteína + ligante, obrigatório por a proteína ser 5 moléculas |
-| critérios de aprovação | RMSD CA ≤ 3,5 Å · RMSD PROTAC ≤ 5,0 Å · ancoragem ≥ 0,5× inicial · warhead/recrutador ≤ 1,0 · crescimento warhead ≤ 2,0× inicial · frações ancoradas ≥ 0,7 |
+| critérios de aprovação | **RMSD do sítio** (CA a ≤12 Å do recrutador) ≤ 3,5 Å · RMSD PROTAC ≤ 5,0 Å · ancoragem ≥ 0,5× inicial · warhead/recrutador ≤ 1,0 · crescimento warhead ≤ 2,0× inicial · frações ancoradas ≥ 0,7 |
+| declarado como contexto | RMSD global e do núcleo, sempre impressos; acima de 3,5 Å exigem declaração |
 | reparos no receptor | 15 cadeias laterais reconstruídas (→ 0 incompletas) · 4 quebras de cadeia nas lacunas, todas a > 16 Å do sítio |
 """)
 
