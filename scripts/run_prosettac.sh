@@ -120,6 +120,20 @@ for head in $HEADS; do
   i=$((i+1))
 done
 
+# Os heads precisam ser legíveis pelo RDKit do jeito que o PRosettaC os lê —
+# sem isso o GetSubstructMatch do translate_anchors sai vazio, devolve -1, e o
+# -1 vira OverflowError cinquenta linhas adiante.
+if ! python "$AQUI/prosettac_fix_heads.py" --dir . --config "$CFG_NOME" \
+       > .heads.out 2>&1; then
+  sed 's/^/  /' .heads.out
+  rm -f .heads.out
+  echo "*** conserte os heads antes de lançar:"
+  echo "***   python $AQUI/prosettac_fix_heads.py --dir $DIR --aplicar"
+  exit 1
+fi
+grep -E "OK —|CORRIGIDO" .heads.out | sed 's/^/  /'
+rm -f .heads.out
+
 # A âncora é CALCULÁVEL a partir do head e do PROTAC, então conferi-la é
 # obrigação e não cortesia: quando ela está errada, o PRosettaC não diz
 # "âncora errada" — o translate_anchors devolve -1 e o erro aparece trinta
