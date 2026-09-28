@@ -12,12 +12,14 @@
 #                                        que o diretório atual é o de trabalho)
 #   3. trazer as entradas para dentro   (copiar + reescrever o config)
 #   4. limpar restos de tentativa morta (senão o clean_pdb pula a limpeza)
-#   5. validar                          (arquivos, cadeias, âncoras)
+#   5. validar E CONSERTAR              (arquivos, cadeias, heads, âncoras —
+#                                        head e âncora são calculáveis, então
+#                                        são corrigidos aqui, não reportados
+#                                        para o usuário digitar outro comando)
 #   6. lançar
 #   7. conferir que subiu               (três sinais, não um)
 #
-# Roda UM job e para. A convenção de `Anchor atoms` (0-based vs 1-based) varia
-# por build, e um lote inteiro com o átomo errado é um lote perdido.
+# Roda UM job e para: um lote inteiro com o átomo errado é um lote perdido.
 # ---------------------------------------------------------------------------
 set -uo pipefail
 
@@ -67,7 +69,7 @@ python "$AQUI/prosettac_localize.py" --dir . --config "$CFG_NOME" || exit 1
 # --- 4. limpar restos de uma tentativa que morreu no meio -----------------
 # O clean_pdb vê um <struct>_<cadeia>.pdb existente, pula a limpeza, e o que
 # segue opera sobre um arquivo pela metade.
-rm -f ./*_[A-Z].fasta ./*_[A-Z].pdb ./log.txt
+rm -f ./*_[A-Z].fasta ./*_[A-Z].pdb ./log.txt ./*_H.sdf
 
 echo
 echo "config:"
@@ -104,6 +106,41 @@ for est in $ESTRUTURAS; do
   i=$((i+1))
 done
 
+# Os heads precisam ser legíveis pelo RDKit do jeito que o PRosettaC os lê:
+# ele protona o head (`<head>_H.sdf`) e remapeia a âncora casando o original
+# contra a versão protonada. Um .sdf que fixa 0 hidrogênio nos carbonos casa
+# zero átomos, o translate_anchors devolve -1, e o -1 vira OverflowError
+# cinquenta linhas adiante. Corrigir é reescrever o .sdf — coordenadas
+# intactas, com .bak — então isto roda com --aplicar: conferir e não consertar
+# só devolveria o erro ao usuário para ele digitar o comando seguinte.
+if ! python "$AQUI/prosettac_fix_heads.py" --dir . --config "$CFG_NOME" \
+       --aplicar > .heads.out 2>&1; then
+  sed 's/^/  /' .heads.out
+  rm -f .heads.out
+  echo "*** os heads não descrevem moléculas válidas — veja acima."
+  exit 1
+fi
+grep -E "OK —|CORRIGIDO|casa [0-9]+ átomos|movido para" .heads.out \
+  | sed 's/^/  /'
+rm -f .heads.out
+
+# A âncora é CALCULÁVEL a partir do head e do PROTAC: é o átomo do head que
+# se liga ao linker. Sendo calculável, ela é aplicada e não sugerida — quando
+# está errada o PRosettaC não diz "âncora errada", o translate_anchors devolve
+# -1 e o erro aparece trinta linhas adiante como índice negativo.
+if python "$AQUI/prosettac_anchors.py" --dir . --config "$CFG_NOME" \
+     --aplicar > .ancoras.out 2>&1; then
+  grep -E "âncora =|linha correta|config atualizado" .ancoras.out \
+    | sed 's/^/  /'
+  ANCHORS=$(awk -F': ' '/^Anchor atoms:/{print $2}' "$CFG_NOME")
+else
+  sed 's/^/  /' .ancoras.out
+  rm -f .ancoras.out
+  echo "*** não consegui determinar as âncoras — veja acima."
+  exit 1
+fi
+rm -f .ancoras.out
+
 # os âncoras têm de existir dentro de cada head
 i=1
 for head in $HEADS; do
@@ -120,43 +157,6 @@ for head in $HEADS; do
   i=$((i+1))
 done
 
-# Os heads precisam ser legíveis pelo RDKit do jeito que o PRosettaC os lê —
-# sem isso o GetSubstructMatch do translate_anchors sai vazio, devolve -1, e o
-# -1 vira OverflowError cinquenta linhas adiante.
-if ! python "$AQUI/prosettac_fix_heads.py" --dir . --config "$CFG_NOME" \
-       > .heads.out 2>&1; then
-  sed 's/^/  /' .heads.out
-  rm -f .heads.out
-  echo "*** conserte os heads antes de lançar:"
-  echo "***   python $AQUI/prosettac_fix_heads.py --dir $DIR --aplicar"
-  exit 1
-fi
-grep -E "OK —|CORRIGIDO" .heads.out | sed 's/^/  /'
-rm -f .heads.out
-
-# A âncora é CALCULÁVEL a partir do head e do PROTAC, então conferi-la é
-# obrigação e não cortesia: quando ela está errada, o PRosettaC não diz
-# "âncora errada" — o translate_anchors devolve -1 e o erro aparece trinta
-# linhas adiante como índice negativo num GetAtomPosition.
-if python "$AQUI/prosettac_anchors.py" --dir . --config "$CFG_NOME" \
-     > .ancoras.out 2>&1; then
-  if grep -q "DIFERENTE" .ancoras.out; then
-    echo
-    grep -E "âncora =|linha correta" .ancoras.out | sed 's/^/  /'
-    echo
-    echo "*** a âncora do config não é o átomo que liga o head ao linker."
-    echo "*** Corrija com:"
-    echo "***   python $AQUI/prosettac_anchors.py --dir $DIR --aplicar"
-    rm -f .ancoras.out
-    exit 1
-  fi
-  grep -E "âncora =" .ancoras.out | sed 's/^/  /'
-else
-  echo "  [aviso] não consegui calcular as âncoras (RDKit ausente?);"
-  echo "          seguindo com o valor do config, por sua conta"
-fi
-rm -f .ancoras.out
-
 if [[ $falhou -ne 0 ]]; then
   echo
   echo "*** corrija o $CFG_NOME antes de lançar:"
@@ -165,9 +165,8 @@ if [[ $falhou -ne 0 ]]; then
 fi
 
 echo
-echo "  Anchor atoms = $ANCHORS"
-echo "  >>> CONFIRA no resultado deste job que os âncoras são os átomos que"
-echo "  >>> ligam cada head ao linker. 0-based vs 1-based varia por build."
+echo "  Anchor atoms = $ANCHORS   (calculado a partir do head e do PROTAC,"
+echo "                             conferido contra a versão protonada)"
 echo
 
 # --- 6. já há resultado? ---------------------------------------------------

@@ -505,3 +505,83 @@ ninguém pode replotar é uma imagem, não um resultado.
 
 **Nomenclatura.** O sistema simulado é o complexo **binário E3–PROTAC**
 (CRBN + recrutador-linker-warhead). Não é ternário: a PCSK9 não está nele.
+
+## Complexo ternário — a fase 9
+
+O nível (ii) da MD simula E3 + PROTAC. O **ternário** (PCSK9 + PROTAC + CRBN)
+precisa primeiro de uma geometria, e geometria de ternário não se observa: se
+prediz. Dois métodos, de famílias diferentes, e o que vale é a concordância
+entre eles.
+
+```bash
+# --- Boltz-2: difusão a partir de sequência, sem saber das nossas poses
+bash scripts/run_boltz_ternary.sh SC0006__WH023 5 4     # 4 lotes de 5 amostras
+python scripts/select_ternary_pose.py --candidato SC0006__WH023
+python scripts/ternary_agreement.py  --candidato SC0006__WH023
+
+# --- PRosettaC: parte das duas poses experimentais e amostra o linker
+bash scripts/run_prosettac.sh SC0006__WH023
+```
+
+Lotes de 5 porque 20 amostras de uma vez estouram os 32 GB da placa — e o
+estouro **não** aparece como erro, aparece como 10 h parado em 0%.
+
+**O critério de aprovação não é o `confidence_score`.** Esse número é dominado
+pelo enovelamento das proteínas, que é fácil e já conhecido. O que decide é o
+**ipTM do pior par entre uma cadeia da E3 e uma cadeia do alvo** (corte 0,5):
+abaixo disso o modelo não sabe onde as duas proteínas se encontram.
+
+**E contar aprovações não é medir concordância.** O `ternary_agreement.py`
+superpõe cada modelo pela E3 e mede o deslocamento do alvo entre modelos. No
+nosso caso: 3 de 25 aprovadas (12%), e as três a **42,7 / 74,6 / 82,2 Å** uma da
+outra — três interfaces incompatíveis, não uma interface com 12% de acerto. Há
+um agrupamento de dez modelos concordando entre 2 e 16 Å, mas todos reprovados
+pelo ipTM. Onde o método é reprodutível, não tem confiança; onde tem confiança,
+não é reprodutível. Isso é um resultado negativo, e ele se publica.
+
+### O que o `run_prosettac.sh` faz antes de lançar
+
+Ele corrige o que é calculável, em vez de avisar e sair:
+
+| Passo | Por quê |
+|---|---|
+| acha o diretório pelo `find` do config | adivinhar o nível da árvore errou três vezes |
+| entra nele e **localiza** as entradas | o Rosetta escreve o `.fasta` no diretório atual e o procura ao lado do PDB de entrada; com caminho absoluto, os dois lugares deixam de ser o mesmo |
+| apaga restos (`*_[A-Z].pdb`, `*_H.sdf`) | o `clean_pdb` vê o arquivo existente, pula a limpeza, e o resto opera sobre metade de um arquivo |
+| confere as cadeias pedidas | `Chains: A B` num PDB cuja cadeia é `C` |
+| **conserta os heads** (`prosettac_fix_heads.py --aplicar`) | ver abaixo |
+| **recalcula a âncora** (`prosettac_anchors.py --aplicar`) | é o átomo do head que liga ao linker, e isso é calculável por MCS contra o PROTAC |
+| `export SETVARS_CALL=` | o `mpivars.deactivate.sh` do env ativo referencia a variável sem definir, e o script do PRosettaC roda com `set -eu` |
+| confere que subiu por **três** sinais | `pgrep`, `squeue -h` (sem `-h` o `grep` casa o cabeçalho) e `Patchdock_Results` |
+
+### O head que não casava
+
+O PRosettaC protona o head (`<head>_H.sdf`) e remapeia a âncora casando o head
+original contra a versão protonada. Um `.sdf` de docking pode trazer o campo de
+valência do bloco de átomos fixando **zero hidrogênio** nos carbonos; o RDKit
+obedece, a sanitização passa sem erro, e o SMILES sai denunciado por colchetes:
+
+```
+Oc1[c]c([C][C]Nc2nnn[nH]2)[c]c(Oc2[c][c][c][c][c]2)[c]1   <- o head
+Oc1cc(CCNc2nnn[nH]2)cc(Oc2ccccc2)c1                       <- o _H.sdf
+```
+
+Um átomo que declara 0 H não casa com o mesmo átomo carregando 1 H. O
+`GetSubstructMatch` sai vazio, o `translate_anchors` devolve `-1`, e o `-1` só
+aparece cinquenta linhas adiante:
+
+```
+anchor_b = HeadB.GetConformer().GetAtomPosition(Anchors[1])
+OverflowError: can't convert negative value to unsigned int
+```
+
+O `prosettac_fix_heads.py` devolve a contagem de H ao RDKit e reescreve o
+`.sdf`; cada candidato a conserto é escrito, **relido do jeito que o PRosettaC
+lê**, casado contra a versão protonada e conferido átomo por átomo contra as
+coordenadas originais (desvio exigido ≤ 0,001 Å). O original fica em `.sdf.bak`.
+
+> **Cuidado que custou um ciclo:** a primeira versão desse script testava o
+> casamento contra uma **releitura do próprio arquivo**. As duas leituras
+> herdam os mesmos campos tortos, o match casava sempre, e o script dizia "OK"
+> para um head que o PRosettaC recusava na linha seguinte. O alvo do teste tem
+> de ser o que o consumidor real usa — aqui, a versão protonada.

@@ -1227,6 +1227,150 @@ else:
     print("a fila da fase 7 já tem o próximo candidato, nada é recalculado.")
 """)
 
+
+# ===========================================================================
+# FASE 9 — O COMPLEXO TERNÁRIO
+# ===========================================================================
+md(r"""
+---
+# Fase 9 — O complexo ternário: a pergunta que a MD do nível (ii) não responde
+
+## O que esta fase faz
+
+As fases 1–8 entregam um PROTAC que **se mantém ligado à E3** por 200 ns, com a
+warhead exposta ao solvente e não recolhida contra a própria CRBN. Isso é
+condição necessária e não é a tese. A tese é o **complexo ternário**:
+PCSK9 + PROTAC + CRBN juntos, com a lisina do alvo alcançável pelo sítio ativo
+da ligase.
+
+A MD do nível (ii) não podia responder isso, porque a PCSK9 não estava na caixa.
+Não foi abordagem errada: sem uma geometria ternária, não há o que simular — e a
+geometria ternária **não é observável**, ela é predita. Esta fase produz a
+predição, por dois caminhos independentes, e só então há sistema para o nível
+(iii).
+
+| Nível | O que está na caixa | O que testa |
+|---|---|---|
+| (i) | PROTAC em água | conformação acessível do linker |
+| (ii) | E3 + PROTAC | o PROTAC solta a E3? a warhead se recolhe? |
+| **(iii)** | **E3 + PROTAC + alvo** | **o ternário é estável e produtivo?** |
+
+## Por que dois métodos
+
+Predizer interface proteína–proteína mediada por um ligante de 19 torções é o
+ponto onde tanto modelo de estrutura quanto docking erram, e erram com
+confiança alta. A defesa não é escolher o melhor método, é exigir que **dois
+métodos de família diferente concordem**:
+
+- **Boltz-2** (modelo de difusão, sem restrição estrutural): prediz as três
+  cadeias e o ligante de uma vez, a partir de sequência. É desinformado sobre
+  as duas poses que nós já validamos.
+- **PRosettaC** (amostragem com restrição): **parte** das duas poses
+  experimentais — o recrutador no cristal 4TZ4 da CRBN e a warhead no 6U26 da
+  PCSK9 —, amostra o linker e agrupa as soluções compatíveis.
+
+Concordando, a geometria vira hipótese testável. Discordando, a discordância é
+o resultado, e ela **se publica**.
+
+## O que o Boltz-2 respondeu: um negativo, e ele é informativo
+
+25 amostras (5 lotes de 5, porque 20 de uma vez estouram os 32 GB da placa).
+O critério de aprovação não é o `confidence_score` global — esse número é
+dominado pelo enovelamento das proteínas, que é fácil e já conhecido. O que
+importa é o **ipTM do pior par entre uma cadeia da E3 e uma cadeia do alvo**:
+abaixo de 0,5, o modelo não sabe onde as duas proteínas se encontram, e o resto
+do número não interessa.
+
+| | |
+|---|---|
+| amostras | 25 |
+| aprovadas (ipTM do pior par E3–alvo ≥ 0,5) | **3 (12%)** |
+| distância entre as 3 aprovadas, superpondo pela CRBN | **42,7 / 74,6 / 82,2 Å** |
+| pares aprovados a menos de 5 Å | **0 de 3** |
+
+As três aprovadas põem a PCSK9 em **três lugares diferentes**. Não é uma
+interface com 12% de taxa de acerto: são interfaces incompatíveis, e o corte de
+ipTM foi satisfeito por acaso três vezes.
+
+Há um agrupamento real nos 25 — dez modelos concordam entre 2 e 16 Å — mas
+**todos os dez foram reprovados pelo ipTM**. Ou seja: onde o modelo é
+reprodutível, ele não tem confiança; onde tem confiança, não é reprodutível.
+
+**Conclusão para a tese:** o Boltz-2 não determina esta geometria ternária. Isso
+é um resultado, não uma falha do pipeline — e faz do PRosettaC, que parte das
+duas poses validadas, a fonte primária em vez de um segundo voto.
+
+> O `ternary_agreement.py` existe por causa disso. Contar quantos modelos
+> passam no corte responde "quantas vezes o método se disse confiante". Medir a
+> distância entre eles responde "o método encontrou **uma** interface?" — e essa
+> é a pergunta. Um único número de confiança alto, sem concordância, é um
+> resultado que se reporta como negativo.
+
+## O que o PRosettaC exigiu: quatro paradas, nenhuma na química
+
+O PRosettaC roda, e as quatro paradas foram todas de acoplamento — caminho,
+ambiente, contabilidade de hidrogênio e índice de átomo. Estão no Apêndice A
+(obstáculos 28–33) porque a forma delas é o que se transfere: **nenhuma das
+quatro disse o que estava errada.**
+
+A mais instrutiva é a última. O PRosettaC protona o head (`<head>_H.sdf`) e
+remapeia a âncora casando o head original contra a versão protonada:
+
+```python
+OldSdf = Chem.SDMolSupplier(old_sdf, sanitize=False)[0]
+try:    Chem.SanitizeMol(OldSdf)
+except: pass                       # a falha é engolida
+NewMatch = NewSdf.GetSubstructMatch(OldSdf)
+if len(NewMatch) == 0: return -1   # e o -1 viaja
+```
+
+O `.sdf` da warhead, vindo do docking, traz o **campo de valência** do bloco de
+átomos fixando zero hidrogênio nos carbonos. O RDKit obedece: a sanitização
+passa sem erro, e o SMILES sai com os colchetes que denunciam o estado —
+
+```
+Oc1[c]c([C][C]Nc2nnn[nH]2)[c]c(Oc2[c][c][c][c][c]2)[c]1   <- o head
+Oc1cc(CCNc2nnn[nH]2)cc(Oc2ccccc2)c1                       <- o _H.sdf
+```
+
+— e um átomo que declara 0 H não casa com o mesmo átomo carregando 1 H. Match
+vazio, `-1`, e cinquenta linhas depois:
+
+```
+anchor_b = HeadB.GetConformer().GetAtomPosition(Anchors[1])
+OverflowError: can't convert negative value to unsigned int
+```
+
+O `prosettac_fix_heads.py` devolve a contagem de hidrogênio ao RDKit e reescreve
+o `.sdf` **com as coordenadas intactas** (desvio conferido átomo por átomo).
+
+**E aqui está o erro de método que vale mais que a correção:** a primeira versão
+desse script testava o casamento comparando o arquivo com uma **releitura dele
+mesmo**. As duas leituras herdam os mesmos campos tortos, então o match casava
+sempre — e o script imprimia "OK" para um head que o PRosettaC recusava na linha
+seguinte. Um teste que compara uma coisa consigo mesma passa sempre e não testa
+nada. Hoje o alvo do teste é a versão **protonada**, que é o que a ferramenta
+usa de verdade.
+
+## Como rodar
+
+```bash
+# Boltz-2 — 4 lotes de 5 amostras (lote maior estoura a memória da placa)
+bash ~/Protac_env/scripts/run_boltz_ternary.sh SC0006__WH023 5 4
+
+# escolher a pose e medir se os modelos concordam entre si
+python ~/Protac_env/scripts/select_ternary_pose.py --candidato SC0006__WH023
+python ~/Protac_env/scripts/ternary_agreement.py  --candidato SC0006__WH023
+
+# PRosettaC — valida, conserta head e âncora, e lança destacado
+bash ~/Protac_env/scripts/run_prosettac.sh SC0006__WH023
+```
+
+O `run_prosettac.sh` **corrige** em vez de avisar, onde a correção é calculável:
+o head é reescrito e a âncora é recomputada a partir do head e do PROTAC. Avisar
+e sair só devolveria ao operador o comando seguinte para digitar.
+""")
+
 # ===========================================================================
 # APÊNDICES
 # ===========================================================================
@@ -1275,6 +1419,21 @@ propósito: esta lista é a parte transferível do trabalho.
 | 26 | "interação espúria" onde não havia | corte absoluto de 15 **pares de átomos** para contatos warhead–E3, nunca calibrado | critérios **relativos** ao frame inicial e ao próprio recrutador |
 | 27 | reprovação por RMSD global de 4,22 Å | o critério media a proteína inteira, e o receptor é multidomínio com dobradiça | portão no **sítio** (1,70 Å); o global vira contexto a declarar |
 
+## Na fase 9 — o complexo ternário
+
+| # | Sintoma | Causa | Correção |
+|---|---|---|---|
+| 28 | Boltz-2 prediria a PCSK9 **sem o prodomínio** | dei ao YAML só a cadeia B do 6U26; o prodomínio são 92 resíduos que não aparecem nela | uma entrada de proteína **por cadeia**, nunca concatenada (concatenar inventaria uma ligação peptídica entre cadeias) |
+| 29 | `ModuleNotFoundError: cuequivariance_ops_torch` | kernels compilados ausentes para a placa | `--no_kernels`; e a sondagem passou a valer para **todos** os lotes, não só o primeiro |
+| 30 | "Found some existing predictions (1), skipping" — que eu reportei como falta de memória | o Boltz pula o que já existe; não era a GPU | `--override`, e ler a mensagem antes de explicá-la |
+| 31 | 20 amostras: 10h30 parado em 0% | estouro de memória da placa, sem mensagem | lotes de 5 |
+| 32 | PRosettaC morria no `conda activate` | o `mpivars.deactivate.sh` do env ativo referencia `SETVARS_CALL` sem definir, e o script do PRosettaC roda com `set -eu` | `export SETVARS_CALL="${SETVARS_CALL:-}"` antes de lançar |
+| 33 | `OverflowError: can't convert negative value to unsigned int` | o `.sdf` do head fixava 0 H nos carbonos; o `GetSubstructMatch` contra a versão protonada saía vazio, `translate_anchors` devolvia `-1`, e o `-1` só aparecia 50 linhas depois | `prosettac_fix_heads.py`: contagem de H devolvida ao RDKit, coordenadas conferidas |
+| 34 | `squeue -u $USER \| grep -q .` dizia "rodando" com a fila vazia | o `grep` casava o **cabeçalho** do `squeue` | `squeue -h` |
+| 35 | caminho do candidato errado três vezes | eu adivinhava o nível da árvore (`$OUT/$CAND`, `$OUT/wp3/$CAND`…) | `find` pelo nome do arquivo de config |
+| 36 | `clean_pdb` produzia `.fasta` que o `rosetta.py` não achava | entradas com caminho absoluto: o Rosetta escreve no diretório atual e procura ao lado do PDB de entrada | `prosettac_localize.py` — entradas copiadas para dentro, nomes relativos |
+| 37 | o script dizia "OK" para um head que o PRosettaC recusava | o teste comparava o arquivo com uma **releitura dele mesmo**, que herda os mesmos campos tortos | o alvo do teste passou a ser a versão protonada, que é o que a ferramenta usa |
+
 ## O padrão
 
 Três coisas atravessam a lista.
@@ -1297,6 +1456,13 @@ saídas que se contradizem são sinal de artefato, e o pipeline hoje **para**
 antes de emitir veredito em vez de reprovar um candidato por causa da aresta da
 caixa periódica. O mesmo vale para limiares: um corte que nunca foi comparado
 com dado real não é critério, é chute com aparência de critério.
+
+**Um teste que compara uma coisa consigo mesma passa sempre.** O obstáculo 37
+é o mais barato de repetir e o mais caro de detectar: o script conferia o head
+contra uma releitura do próprio head, as duas leituras herdavam o mesmo defeito,
+o match casava e o relatório dizia OK — enquanto a ferramenta real, que casa
+contra a versão **protonada**, recusava. Verificação só verifica quando o alvo
+da comparação é o que o consumidor de verdade usa.
 
 **Escrever código contra a mensagem que se tem à mão, não contra a que a
 ferramenta produz.** Os obstáculos 18, 19 e 22 são meus, e todos dessa forma.
