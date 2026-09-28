@@ -22,10 +22,16 @@ No `SC0006__WH023` o alcance foi 11 Å, e a varredura do PatchDock
 (`patchdock_span_scan.sh`) mostrou que o par CRBN/PCSK9 só produz soluções a
 partir de 14 Å, com regime utilizável em 18–20 Å:
 
-     10 Å ->   0 transformadas          20 Å ->  77
-     12 Å ->   0                        25 Å -> 295
-     14 Å ->   1                        30 Å -> 639
-     16 Å ->  14                       100 Å -> 8312   (controle: preparação OK)
+     10 Å ->   0 transformadas      17 Å ->  19
+     12 Å ->   0                    18 Å ->  40
+     14 Å ->   1                    20 Å ->  77
+     15 Å ->   7                    25 Å -> 295
+     16 Å ->  14                   100 Å -> 8312   (controle: preparação OK)
+
+O passo fino importa: 14 Å dá UMA transformada, mas 15 Å já dá 7 — e 7 pontos
+de partida, com Full: True (50 refinamentos cada), rendem ~350 modelos. É pouco
+e não é nada. Daí a faixa `marginal`: tentável, sabendo que o cluster pode não
+se formar.
 
 Ou seja: **o candidato estava geometricamente impossibilitado antes de a MD
 começar**, e a MD de 46 h não tinha como perceber — ela simula E3 + PROTAC, sem

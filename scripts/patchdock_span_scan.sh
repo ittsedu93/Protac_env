@@ -151,16 +151,31 @@ fi
 
 echo "  ALCANCE MÍNIMO: $primeiro_ok Å entre os dois átomos de conjugação."
 echo
-echo "  O linker deste candidato alcança até 11 Å (o initial_distances.hist)."
-if [[ "$primeiro_ok" -le 11 ]]; then
+
+# O alcance DESTE linker sai do histograma que o PRosettaC amostrou: o último
+# bin com contagem. Estava cravado em 11 Å aqui — verdade para o SC0006 e
+# mentira para qualquer outro candidato que rodasse este script.
+ALCANCE="$(awk '$2+0>0{a=$1} END{print a+0}' ../initial_distances.hist \
+            2>/dev/null || echo 0)"
+if [[ "${ALCANCE:-0}" -eq 0 ]]; then
+  echo "  (não achei o initial_distances.hist para saber o alcance deste"
+  echo "   linker; meça com:  python scripts/linker_span.py ...)"
+  exit 0
+fi
+echo "  O linker deste candidato alcança até $ALCANCE Å (initial_distances.hist)."
+if [[ "$primeiro_ok" -le "$ALCANCE" ]]; then
   echo "  Isso CABE no alcance dele — então o zero de $D_ORIG Å não é falta de"
   echo "  comprimento, é a margem: a restrição do PRosettaC usa o topo da"
   echo "  distribuição, e sobra pouco. Vale relançar com Full: True e um"
   echo "  histograma mais amostrado."
 else
-  echo "  Isso NÃO cabe: faltam $(( primeiro_ok - 11 )) Å. É achado, não falha —"
-  echo "  o par CRBN/PCSK9 exige um linker mais longo que o deste candidato, e"
+  echo "  Isso NÃO cabe: faltam $(( primeiro_ok - ALCANCE )) Å. É achado, não"
+  echo "  falha — o par exige um linker mais longo que o deste candidato, e"
   echo "  agora isso é um número que filtra o catálogo no WP2 em vez de uma"
-  echo "  suspeita. Some ~1,3 Å por átomo de cadeia para estimar quantos"
-  echo "  átomos faltam."
+  echo "  suspeita."
+  echo
+  echo "  A taxa MEDIDA nesta série é ~1,0 Å por ligação de cadeia (a teórica,"
+  echo "  de cadeia toda anti, é 1,27 — confôrmero real se enrola). Então"
+  echo "  faltam ~$(( primeiro_ok - ALCANCE )) ligações, e não $(( (primeiro_ok - ALCANCE) * 10 / 13 )):"
+  echo "  usar a teórica subestima, e subestimar aqui devolve o mesmo zero."
 fi
