@@ -11,13 +11,15 @@
 #                                        relativos; tudo depois disto assume
 #                                        que o diretório atual é o de trabalho)
 #   3. trazer as entradas para dentro   (copiar + reescrever o config)
-#   4. limpar restos de tentativa morta (senão o clean_pdb pula a limpeza)
+#   4. limpar restos de tentativa morta (o PRosettaC pula etapa cujo arquivo
+#                                        já existe, mesmo com zero byte)
 #   5. validar E CONSERTAR              (arquivos, cadeias, heads, âncoras —
 #                                        head e âncora são calculáveis, então
 #                                        são corrigidos aqui, não reportados
 #                                        para o usuário digitar outro comando)
 #   6. lançar
-#   7. conferir que subiu               (três sinais, não um)
+#   7. conferir que subiu               (cinco sinais e 60 s de paciência; e
+#                                        não subindo, DESCOBRIR por quê aqui)
 #
 # Roda UM job e para: um lote inteiro com o átomo errado é um lote perdido.
 # ---------------------------------------------------------------------------
@@ -67,9 +69,20 @@ echo "  diretório: $DIR"
 python "$AQUI/prosettac_localize.py" --dir . --config "$CFG_NOME" || exit 1
 
 # --- 4. limpar restos de uma tentativa que morreu no meio -----------------
-# O clean_pdb vê um <struct>_<cadeia>.pdb existente, pula a limpeza, e o que
-# segue opera sobre um arquivo pela metade.
-rm -f ./*_[A-Z].fasta ./*_[A-Z].pdb ./log.txt ./*_H.sdf
+# ANTES de limpar: um resultado pronto não é resto.
+if [[ -d Results || -d results ]]; then
+  echo "  já há resultado aqui — nada a fazer"
+  exit 0
+fi
+
+# O PRosettaC decide o que fazer pela EXISTÊNCIA do arquivo: o clean_pdb vê um
+# <struct>_<cadeia>.pdb e pula a limpeza, e um `random_sampling.sdf` de zero
+# byte faz pular a amostragem que o produziria. A primeira versão disto apagava
+# só os produtos que eu tinha visto naquele dia — e nomear produtos um a um é
+# uma lista que sempre está incompleta. A regra agora é a inversa: fica o que o
+# config declara como entrada, sai todo o resto.
+python "$AQUI/prosettac_clean.py" --dir . --config "$CFG_NOME" --aplicar \
+  || exit 1
 
 echo
 echo "config:"
@@ -169,13 +182,7 @@ echo "  Anchor atoms = $ANCHORS   (calculado a partir do head e do PROTAC,"
 echo "                             conferido contra a versão protonada)"
 echo
 
-# --- 6. já há resultado? ---------------------------------------------------
-if [[ -d Results || -d results ]]; then
-  echo "  já há resultado aqui — nada a fazer"
-  exit 0
-fi
-
-# --- 7. lançar -------------------------------------------------------------
+# --- 6. lançar -------------------------------------------------------------
 # O run_prosettac.sh do PRosettaC roda com `set -euo pipefail` e faz
 # `conda activate`. Isso dispara o hook de DESATIVAÇÃO do env ativo, e o
 # mpivars.deactivate.sh do mdtools referencia SETVARS_CALL sem defini-la —
@@ -228,7 +235,15 @@ if [[ -s "$LOG" ]]; then
   exit 1
 fi
 
-echo "  o log está VAZIO: o processo morreu antes de escrever a primeira"
+echo "  o log está VAZIO: nada foi escrito, nem por bash nem por python."
+echo
+echo "  O script que estou chamando — $PROSETTAC/run_prosettac.sh — é onde a"
+echo "  causa mora, então ele vai impresso junto com o rastro:"
+echo "  --------------------------------------------------------------------"
+sed -n '1,40p' "$PROSETTAC/run_prosettac.sh" | sed 's/^/      /'
+echo "  --------------------------------------------------------------------"
+echo
+echo "  o processo morreu antes de escrever a primeira"
 echo "  linha. Repetindo em primeiro plano, com rastro, por até 120 s — o que"
 echo "  aparecer abaixo é a causa. (Conseguindo trabalhar, ele é interrompido"
 echo "  no fim do tempo; os restos são limpos no próximo lançamento.)"
