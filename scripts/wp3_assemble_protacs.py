@@ -74,7 +74,15 @@ def main():
     ap.add_argument("--pcsk9-chain", default="B")
     ap.add_argument("--anchor-serial", type=int, default=1)
     ap.add_argument("--prosettac-dir", default="/mnt/hd2tb/Documentos/PRosettaC")
-    ap.add_argument("--prosettac-full", default="False")
+    # `Full` no PRosettaC não é verbosidade, é tamanho de amostragem. No
+    # main.py dele:  Full -> Global = 1000 e Local = 50;  senão 500 e 10.
+    # Global é quantas soluções o PatchDock guarda antes do filtro geométrico,
+    # e Local é quantos refinamentos do Rosetta por solução. Com `False` a
+    # amostragem global cai à metade e o refinamento a um quinto — e foi com
+    # `False` que o PatchDock devolveu ZERO soluções dentro da restrição de
+    # distância. Para a fonte primária da geometria ternária, o default é True.
+    ap.add_argument("--prosettac-full", default="True",
+                    choices=("True", "False"))
     ap.add_argument("--outdir", type=Path, required=True)
     args = ap.parse_args()
 

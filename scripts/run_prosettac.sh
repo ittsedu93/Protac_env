@@ -180,6 +180,20 @@ fi
 echo
 echo "  Anchor atoms = $ANCHORS   (calculado a partir do head e do PROTAC,"
 echo "                             conferido contra a versão protonada)"
+
+# `Full` não é verbosidade: no main.py do PRosettaC ele vale Global = 1000 e
+# Local = 50, contra 500 e 10. Global é quantas soluções o PatchDock guarda
+# antes do filtro geométrico. Lançar a busca definitiva com metade da
+# amostragem e concluir "não existe geometria" seria concluir errado.
+if [[ "$(awk -F': ' '/^Full:/{print $2}' "$CFG_NOME")" != "True" ]]; then
+  echo
+  echo "  [ATENÇÃO] Full: False — protocolo REDUZIDO (PatchDock guarda 500"
+  echo "            soluções em vez de 1000, e o Rosetta refina 10 por solução"
+  echo "            em vez de 50). Serve para testar a canalização; não serve"
+  echo "            para concluir que não existe geometria ternária. Para a"
+  echo "            busca definitiva:"
+  echo "              sed -i 's/^Full: False/Full: True/' $DIR/$CFG_NOME"
+fi
 echo
 
 # --- 6. lançar -------------------------------------------------------------

@@ -1095,7 +1095,7 @@ WARHEAD_ANCHOR_SERIAL = 1      # troque para 0 se a sua build for 0-based
 
 def generate_prosettac_config(struct_a, chain_a, struct_b, chain_b, head_a,
                               head_b, anchor_a, anchor_b, protac_smi,
-                              out_dir: Path, full_run=False):
+                              out_dir: Path, full_run=True):
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     cfg = out_dir / "prosetta_config.txt"
@@ -1113,7 +1113,11 @@ def generate_prosettac_config(struct_a, chain_a, struct_b, chain_b, head_a,
 def emit_prosettac_jobs(protac_df, struct_e3, chain_e3, struct_pcsk9,
                         chain_pcsk9, head_e3_sdf, e3_anchor,
                         head_warhead_dir, out_root: Path = None,
-                        full_run=False):
+                        # Full -> Global = 1000 e Local = 50 no main.py do
+                        # PRosettaC; senão 500 e 10. É tamanho de amostragem,
+                        # não verbosidade, e com 500 o PatchDock devolveu zero
+                        # soluções dentro da restrição de distância.
+                        full_run=True):
     out_root = Path(out_root or WP3_DIR / "prosettac")
     out_root.mkdir(parents=True, exist_ok=True)
     cmds = []
