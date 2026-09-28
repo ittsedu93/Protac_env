@@ -182,24 +182,70 @@ fi
 # sob `set -eu` isso mata o script antes da primeira linha de trabalho.
 export SETVARS_CALL="${SETVARS_CALL:-}"
 
+LOG=run_prosettac.log
 echo "[$(date -Is)] lançando..."
-setsid "$PROSETTAC/run_prosettac.sh" "$DIR" "$CFG_NOME" \
-    > run_prosettac.log 2>&1 &
+setsid "$PROSETTAC/run_prosettac.sh" "$DIR" "$CFG_NOME" > "$LOG" 2>&1 &
 disown -a
-sleep 8
 
 # --- 8. conferir que subiu -------------------------------------------------
+# Cinco sinais, e até 60 s de paciência. Oito segundos não bastavam: o
+# `conda activate` mais a importação do RDKit e do Rosetta consomem isso antes
+# de a ferramenta escrever a primeira linha, e um `pgrep` que não casa nesse
+# instante não quer dizer que nada subiu.
+usuario="${USER:-$(id -un)}"
+esta_vivo() {
+  pgrep -f "$CFG_NOME"    > /dev/null && return 0
+  pgrep -f "$PROSETTAC"   > /dev/null && return 0
+  # o main.py do PRosettaC, e não qualquer main.py do usuário — um `pgrep`
+  # frouxo aqui daria "RODANDO" por causa de outro job na mesma máquina
+  pgrep -u "$usuario" -f "PRosettaC.*main\.py" > /dev/null && return 0
+  squeue -h -u "$usuario" 2>/dev/null | grep -q . && return 0
+  [[ -d Patchdock_Results ]] && return 0
+  return 1
+}
+
 vivo=0
-pgrep -f "$CFG_NOME" > /dev/null && vivo=1
-squeue -h -u "${USER:-$(id -un)}" 2>/dev/null | grep -q . && vivo=1
-[[ -d Patchdock_Results ]] && vivo=1
+for _ in $(seq 1 12); do
+  sleep 5
+  if esta_vivo; then vivo=1; break; fi
+done
 
 if [[ $vivo -eq 1 ]]; then
   echo "  RODANDO — pode desligar o notebook"
-  squeue -h -u "${USER:-$(id -un)}" 2>/dev/null | head -5 | sed 's/^/      /'
-  echo "  log: tail -f $DIR/run_prosettac.log"
-else
-  echo "  [NÃO SUBIU] log completo:"
-  sed 's/^/      /' run_prosettac.log 2>/dev/null | head -40
+  squeue -h -u "$usuario" 2>/dev/null | head -5 | sed 's/^/      /'
+  echo "  log: tail -f $DIR/$LOG"
+  exit 0
+fi
+
+# --- 9. não subiu: descobrir POR QUÊ, aqui, agora -------------------------
+# Dizer "[NÃO SUBIU]" e imprimir um log vazio devolve o problema sem nenhuma
+# informação — foi o que aconteceu, e custou um ciclo. Quando o processo morre
+# antes de escrever, a única fonte é a execução em primeiro plano com rastro.
+echo "  [NÃO SUBIU]"
+if [[ -s "$LOG" ]]; then
+  echo "  log ($(wc -l < "$LOG") linhas), últimas 40:"
+  tail -40 "$LOG" | sed 's/^/      /'
   exit 1
 fi
+
+echo "  o log está VAZIO: o processo morreu antes de escrever a primeira"
+echo "  linha. Repetindo em primeiro plano, com rastro, por até 120 s — o que"
+echo "  aparecer abaixo é a causa. (Conseguindo trabalhar, ele é interrompido"
+echo "  no fim do tempo; os restos são limpos no próximo lançamento.)"
+echo "  --------------------------------------------------------------------"
+timeout --foreground 120 bash -x "$PROSETTAC/run_prosettac.sh" \
+        "$DIR" "$CFG_NOME" 2>&1 | tail -60 | sed 's/^/      /'
+codigo=${PIPESTATUS[0]}
+echo "  --------------------------------------------------------------------"
+if [[ $codigo -eq 124 ]]; then
+  echo "  [ATENÇÃO] ele rodou os 120 s sem morrer. Então ele NÃO morre sozinho:"
+  echo "  o que falhou foi o desligamento do terminal (setsid/disown). Relance"
+  echo "  por conta própria, sem intermediário:"
+  echo
+  echo "    cd $DIR"
+  echo "    nohup setsid $PROSETTAC/run_prosettac.sh $DIR $CFG_NOME \\"
+  echo "        > $LOG 2>&1 < /dev/null &"
+else
+  echo "  saiu com código $codigo — a causa está nas linhas acima."
+fi
+exit 1
