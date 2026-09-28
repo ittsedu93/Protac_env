@@ -48,22 +48,38 @@ def ler_config(cfg: Path):
 def ancora_do_head(head: Chem.Mol, protac: Chem.Mol):
     """Índice 0-based do átomo do head que se liga ao linker.
 
-    Devolve (indice, quantos_candidatos, diagnostico).
+    Devolve (indice_no_head, indice_no_protac, quantos_candidatos, diagnóstico).
+
+    O índice no PROTAC sai do mesmo casamento e é o que o `linker_span.py` usa
+    para medir o alcance. Ter duas funções para "qual átomo liga ao linker" —
+    uma para a âncora do PRosettaC e outra para o alcance — seria pedir que
+    divergissem: a distância medida deixaria de ser a distância restringida.
     """
     head = Chem.RemoveHs(head)
     protac = Chem.RemoveHs(protac)
 
-    mcs = rdFMCS.FindMCS([protac, head], timeout=30,
-                         ringMatchesRingOnly=True, completeRingsOnly=False,
-                         atomCompare=rdFMCS.AtomCompare.CompareElements,
-                         bondCompare=rdFMCS.BondCompare.CompareOrderExact)
-    if mcs.numAtoms == 0:
-        return None, 0, "nenhuma subestrutura comum entre head e PROTAC"
-    patt = Chem.MolFromSmarts(mcs.smartsString)
-    m_pro = protac.GetSubstructMatch(patt)
-    m_head = head.GetSubstructMatch(patt)
-    if not m_pro or not m_head:
-        return None, 0, "o MCS não casou nos dois"
+    # Caminho rápido: o head normalmente É subestrutura exata do PROTAC — foi a
+    # montagem que os uniu. Medido nas moléculas desta série: 0,5 ms contra ~30 s
+    # do rdFMCS, que num catálogo é a diferença entre minutos e horas.
+    m_pro = protac.GetSubstructMatch(head)
+    if m_pro:
+        m_head = tuple(range(head.GetNumAtoms()))
+        origem = f"subestrutura exata de {len(m_pro)} átomos"
+    else:
+        # Reserva, para o head cuja percepção difere do PROTAC — um .sdf de pose
+        # com aromaticidade escrita de outro jeito, por exemplo.
+        mcs = rdFMCS.FindMCS([protac, head], timeout=30,
+                             ringMatchesRingOnly=True, completeRingsOnly=False,
+                             atomCompare=rdFMCS.AtomCompare.CompareElements,
+                             bondCompare=rdFMCS.BondCompare.CompareOrderExact)
+        if mcs.numAtoms == 0:
+            return None, None, 0, "nenhuma subestrutura comum entre head e PROTAC"
+        patt = Chem.MolFromSmarts(mcs.smartsString)
+        m_pro = protac.GetSubstructMatch(patt)
+        m_head = head.GetSubstructMatch(patt)
+        if not m_pro or not m_head:
+            return None, None, 0, "o MCS não casou nos dois"
+        origem = f"MCS de {mcs.numAtoms} átomos"
 
     # head -> protac, pelos índices correspondentes do MCS
     para_protac = dict(zip(m_head, m_pro))
@@ -74,17 +90,19 @@ def ancora_do_head(head: Chem.Mol, protac: Chem.Mol):
         a = protac.GetAtomWithIdx(i_pro)
         fora = [v.GetIdx() for v in a.GetNeighbors() if v.GetIdx() not in dentro]
         if fora:
-            candidatos.append((i_head, head.GetAtomWithIdx(i_head).GetSymbol(),
+            candidatos.append((i_head, i_pro,
+                               head.GetAtomWithIdx(i_head).GetSymbol(),
                                len(fora)))
 
     if not candidatos:
-        return None, 0, (f"o head casou {mcs.numAtoms} átomos, mas nenhum tem "
-                         f"vizinho fora dele — o head parece ser o PROTAC inteiro")
+        return None, None, 0, (
+            f"{origem}, mas nenhum átomo tem vizinho fora dele — o head parece "
+            f"ser o PROTAC inteiro")
     # havendo mais de um, o que tem mais ligações para fora é o ponto de saída
-    candidatos.sort(key=lambda c: -c[2])
-    return candidatos[0][0], len(candidatos), \
-        f"MCS de {mcs.numAtoms} átomos; candidatos: " + \
-        ", ".join(f"{i}({s})" for i, s, _ in candidatos)
+    candidatos.sort(key=lambda c: -c[3])
+    return candidatos[0][0], candidatos[0][1], len(candidatos), \
+        f"{origem}; candidatos: " + \
+        ", ".join(f"{i}({s})" for i, _, s, _ in candidatos)
 
 
 def main():
@@ -123,7 +141,7 @@ def main():
             ok = False
             novos.append(atuais[i] if i < len(atuais) else "1")
             continue
-        idx, n_cand, diag = ancora_do_head(mol, protac)
+        idx, _idx_protac, n_cand, diag = ancora_do_head(mol, protac)
         atual = atuais[i] if i < len(atuais) else "?"
         print(f"  {h.name}  ({Chem.RemoveHs(mol).GetNumAtoms()} átomos pesados)")
         print(f"    {diag}")

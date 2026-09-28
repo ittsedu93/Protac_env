@@ -79,6 +79,14 @@ def main():
     ap.add_argument("--linker-ranking", type=Path)
     ap.add_argument("--subcomplexes", type=Path)
     ap.add_argument("--top", type=int, default=10)
+    # O portão geométrico. Ele ELIMINA em vez de pontuar: um PROTAC cujo linker
+    # não vence o vão entre os dois sítios não é um candidato pior, é um
+    # candidato impossível — e foi exatamente esse que consumiu 46 h de MD antes
+    # de o PatchDock devolver zero transformadas.
+    ap.add_argument("--span", type=Path,
+                    help="linker_span.csv — elimina quem não alcança")
+    ap.add_argument("--span-min", type=float, default=18.0,
+                    help="alcance exigido em Å (do patchdock_span_scan.sh)")
     ap.add_argument("--out", type=Path, required=True)
     args = ap.parse_args()
 
@@ -92,6 +100,36 @@ def main():
                if c in wh.columns]
     df = df.merge(wh[cols_wh], on="warhead_id", how="left",
                   suffixes=("", "_wh"))
+
+    # --- portão geométrico, antes de qualquer pontuação -------------------
+    if args.span and args.span.expanduser().exists():
+        sp = pd.read_csv(args.span.expanduser())
+        col = "alcance_max_A"
+        if col not in sp.columns:
+            print(f"  [aviso] {args.span.name} sem coluna {col}: portão "
+                  f"geométrico NÃO aplicado")
+        else:
+            df = df.merge(sp[["candidate_id", col, "n_ligacoes"]],
+                          on="candidate_id", how="left")
+            antes = len(df)
+            alcanca = pd.to_numeric(df[col], errors="coerce") >= args.span_min
+            # Sem medida não é aprovação: quem não tem alcance medido cai fora
+            # junto, e o número aparece — silenciar isso reintroduziria o furo.
+            sem_medida = int(pd.to_numeric(df[col], errors="coerce").isna().sum())
+            df = df[alcanca].reset_index(drop=True)
+            print(f"  portão geométrico (alcance ≥ {args.span_min:.0f} Å): "
+                  f"{len(df)} de {antes} passam"
+                  + (f"; {sem_medida} sem alcance medido, eliminados"
+                     if sem_medida else ""))
+            if df.empty:
+                raise SystemExit(
+                    "  nenhum candidato alcança o vão entre os dois sítios.\n"
+                    "  Não há o que ranquear: a decisão é do WP2 — refiltrar o\n"
+                    "  catálogo de linkers exigindo cadeia mais longa e remontar.")
+    else:
+        print("  [ATENÇÃO] sem --span: o ranking NÃO verifica se o linker")
+        print("            alcança o vão entre os dois sítios. Foi assim que")
+        print("            um candidato geometricamente impossível chegou à MD.")
 
     # geometria do linker, via manifesto dos sub-complexos
     if args.subcomplexes and args.subcomplexes.expanduser().exists():
@@ -127,7 +165,8 @@ def main():
     df.to_csv(out, index=False)
 
     mostrar = [c for c in ("rank", "candidate_id", "r1", "r2", "r3",
-                           "protac_mw", "protac_rotb", "ligand_efficiency",
+                           "protac_mw", "protac_rotb", "alcance_max_A",
+                           "ligand_efficiency",
                            "frac_sem_clash", "std_score", "score_composto")
                if c in df.columns]
     print(f"\nPesos: {PESOS}")
