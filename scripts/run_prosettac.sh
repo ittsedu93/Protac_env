@@ -102,22 +102,48 @@ for f in $ESTRUTURAS $HEADS $PROTAC; do
   [[ -s "$f" ]] || { echo "  [FALTA] $f"; falhou=1; }
 done
 
+# A cadeia pedida existe no PDB? Quando não existe e a estrutura tem UMA cadeia
+# só, não há ambiguidade: o config está com o default do emissor (`A`) e o
+# arquivo preparado tem outra letra. Corrigir é ler o arquivo; pedir que o
+# operador edite 104 configs à mão é devolver trabalho que o script faz. Tendo
+# mais de uma cadeia, a escolha é dele e o script para.
+residuos_da_cadeia() {   # $1 = pdb, $2 = cadeia
+  awk -v c="$2" '/^ATOM/ && substr($0,22,1)==c{print substr($0,23,5)}' "$1" \
+    | sort -u | wc -l
+}
+
 i=1
+NOVAS_CADEIAS=()
+cadeia_mudou=0
 for est in $ESTRUTURAS; do
   cad=$(echo "$CADEIAS" | cut -d' ' -f$i)
+  nova="$cad"
   if [[ -s "$est" ]]; then
-    presentes=$(awk '/^ATOM/{print substr($0,22,1)}' "$est" | sort -u | tr -d '\n ')
-    n=$(awk -v c="$cad" '/^ATOM/ && substr($0,22,1)==c{print substr($0,23,5)}' \
-          "$est" | sort -u | wc -l)
-    if [[ "$n" -eq 0 ]]; then
-      echo "  [CADEIA ERRADA] $est: pediu '$cad', tem '$presentes'"
+    presentes=$(awk '/^ATOM/{print substr($0,22,1)}' "$est" | sort -u \
+                  | tr -d '\n ')
+    n=$(residuos_da_cadeia "$est" "$cad")
+    if [[ "$n" -eq 0 && ${#presentes} -eq 1 ]]; then
+      nova="$presentes"
+      echo "  [CADEIA CORRIGIDA] $est: config pedia '$cad', o arquivo tem só"
+      echo "                     '$presentes' ($(residuos_da_cadeia "$est" "$nova") resíduos) — usando essa"
+      cadeia_mudou=1
+    elif [[ "$n" -eq 0 ]]; then
+      echo "  [CADEIA ERRADA] $est: pediu '$cad', tem '$presentes' — são várias,"
+      echo "                  a escolha é sua: edite a linha Chains do config"
       falhou=1
     else
       echo "  cadeia $cad de $est: $n resíduos"
     fi
   fi
+  NOVAS_CADEIAS+=("$nova")
   i=$((i+1))
 done
+
+if [[ $cadeia_mudou -eq 1 ]]; then
+  sed -i "s|^Chains: .*|Chains: ${NOVAS_CADEIAS[*]}|" "$CFG_NOME"
+  CADEIAS="${NOVAS_CADEIAS[*]}"
+  echo "  config atualizado:  Chains: $CADEIAS"
+fi
 
 # Os heads precisam ser legíveis pelo RDKit do jeito que o PRosettaC os lê:
 # ele protona o head (`<head>_H.sdf`) e remapeia a âncora casando o original

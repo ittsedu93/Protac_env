@@ -67,11 +67,14 @@ def main():
     ap.add_argument("--top-warheads", type=int, default=15)
     ap.add_argument("--cos-min", type=float, default=0.3)
     ap.add_argument("--e3-structure", type=Path)
-    ap.add_argument("--e3-chain", default="A")
+    # Vazio = descobrir no PDB. O default "A" produziu 104 configs pedindo a
+    # cadeia A de um receptor preparado que só tem a C, e o PRosettaC não diz
+    # "cadeia errada": ele segue com zero resíduo. A cadeia está no arquivo.
+    ap.add_argument("--e3-chain", default="")
     ap.add_argument("--e3-head", type=Path)
     ap.add_argument("--e3-anchor-serial", type=int, default=1)
     ap.add_argument("--pcsk9-structure", type=Path)
-    ap.add_argument("--pcsk9-chain", default="B")
+    ap.add_argument("--pcsk9-chain", default="")
     ap.add_argument("--anchor-serial", type=int, default=1)
     ap.add_argument("--prosettac-dir", default="/mnt/hd2tb/Documentos/PRosettaC")
     # `Full` no PRosettaC não é verbosidade, é tamanho de amostragem. No
@@ -159,9 +162,31 @@ def main():
           f"rotB: {df['protac_rotb'].min()}–{df['protac_rotb'].max()}")
 
     print("\n[3/3] Emitindo jobs do PRosettaC")
+    def cadeia_do_pdb(pdb: Path, pedida: str, rotulo: str) -> str:
+        """A cadeia declarada, ou a única que o arquivo tem."""
+        presentes = sorted({l[21] for l in pdb.read_text().splitlines()
+                            if l.startswith("ATOM")})
+        if pedida:
+            if pedida not in presentes:
+                raise SystemExit(
+                    f"  {rotulo}: pediu cadeia '{pedida}', {pdb.name} tem "
+                    f"{presentes}")
+            return pedida
+        if len(presentes) == 1:
+            print(f"  {rotulo}: cadeia '{presentes[0]}' (única em {pdb.name})")
+            return presentes[0]
+        raise SystemExit(
+            f"  {rotulo}: {pdb.name} tem as cadeias {presentes} — passe "
+            f"--{rotulo.lower()}-chain, a escolha não é adivinhável")
+
     if not (args.e3_structure and args.e3_head and args.pcsk9_structure):
         print("  [pulado] faltam --e3-structure / --e3-head / --pcsk9-structure")
         return
+
+    cad_e3 = cadeia_do_pdb(Path(args.e3_structure).expanduser(),
+                           args.e3_chain, "E3")
+    cad_alvo = cadeia_do_pdb(Path(args.pcsk9_structure).expanduser(),
+                             args.pcsk9_chain, "PCSK9")
 
     root = out / "prosettac"
     root.mkdir(parents=True, exist_ok=True)
@@ -221,7 +246,7 @@ def main():
         d.mkdir(parents=True, exist_ok=True)
         (d / "prosetta_config.txt").write_text(
             f"Structures: {args.e3_structure} {args.pcsk9_structure}\n"
-            f"Chains: {args.e3_chain} {args.pcsk9_chain}\n"
+            f"Chains: {cad_e3} {cad_alvo}\n"
             f"Heads: {args.e3_head} {head_b}\n"
             f"Anchor atoms: {args.e3_anchor_serial} {args.anchor_serial}\n"
             f"Protac: {r.protac_smi_path}\n"
