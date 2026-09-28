@@ -43,14 +43,17 @@ catálogo inteiro. Este script aplica o número.
 
 O que ele mede, por candidato
 -----------------------------
-    alcance_max_A     maior distância âncora–âncora entre os confôrmeros
-    alcance_mediana_A a mediana — um linker cujo alcance só aparece no
-                      confôrmero extremo está forçado
+    alcance_A         o ALCANCE: maior distância âncora–âncora que a
+                      topologia permite (limite de distance-geometry, 3 ms)
     n_ligacoes        caminho de ligações entre as duas âncoras
-    alcance_teto_A    o teto geométrico (n_ligacoes x 1,27 Å, cadeia toda anti)
+    ligacoes_faltando quanto falta para o requisito, pela taxa Å/ligação
+                      medida no próprio conjunto
+    alcance_mediana_A só com --amostrar: a mediana sobre confôrmeros. O
+                      alcance diz se é POSSÍVEL; a mediana, se é confortável —
+                      um PROTAC que só vence o vão estendido paga entropia.
 
-O teto entra porque ele diz QUANTO FALTA em átomos: a ~1,27 Å por ligação,
-subir de 11 para 18 Å pede ~6 ligações a mais na cadeia.
+NÃO use máximo amostrado como alcance: ele satura muito abaixo do real, e essa
+foi a versão errada deste script. Os números estão em `limite_de_alcance`.
 
 A âncora vem do `prosettac_anchors.ancora_do_head` — a mesma função que o
 PRosettaC consome. Duas implementações de "qual átomo liga ao linker" acabariam
@@ -66,7 +69,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from rdkit import Chem, RDLogger
-from rdkit.Chem import AllChem, rdmolops
+from rdkit.Chem import AllChem, rdDistGeom, rdmolops
 
 from prosettac_anchors import ancora_do_head
 
@@ -75,13 +78,49 @@ RDLogger.DisableLog("rdApp.*")
 ANGSTROM_POR_LIGACAO = 1.27   # projeção de uma ligação C–C numa cadeia anti
 
 
-def alcance(protac: Chem.Mol, i_a: int, i_b: int, n_confs: int, semente: int,
-            otimizar: bool):
-    """Distribuição da distância entre as duas âncoras, em Å.
+def limite_de_alcance(protac: Chem.Mol, i_a: int, i_b: int) -> float:
+    """O ALCANCE: maior distância âncora–âncora que a topologia permite, em Å.
 
-    Amostra confôrmeros do PROTAC inteiro — é o que o `SampleDist` do PRosettaC
-    faz. Os H entram para a geometria ficar correta, e como o `AddHs` os
-    acrescenta no FIM, os índices dos átomos pesados não se movem.
+    Sai da matriz de limites de distance-geometry do RDKit, que resolve as
+    restrições de comprimento de ligação, ângulo e anel — não é amostragem, é o
+    teto, e sai em 3 ms.
+
+    Por que não o máximo amostrado
+    ------------------------------
+    A primeira versão deste script usava o máximo sobre confôrmeros ETKDG. Ele
+    SATURA muito abaixo do real, porque confôrmero gerado por aleatoriedade
+    quase nunca cai na conformação estendida. Medido no PROTAC do
+    `SC0013__WH022`:
+
+        limite de distance-geometry .......... 18,03 Å   (3 ms)
+        histograma do próprio PRosettaC ...... 18 Å
+        amostrado com 200 confôrmeros ........ 14,44 Å   (27 s)
+        amostrado com 800 confôrmeros ........ 14,44 Å   (108 s)
+
+    Quadruplicar a amostra não move o máximo em 0,01 Å. E o erro não era
+    acadêmico: com o máximo amostrado, este script classificou como `curto` o
+    candidato que o PRosettaC aceitou e levou ao refinamento do Rosetta.
+
+    O PRosettaC amostra até 200 confôrmeros POR BIN de distância — busca
+    dirigida, não amostragem cega — e por isso ele encosta no teto. Como o que
+    este portão precisa prever é o que o PRosettaC vai fazer, o teto é a medida
+    certa.
+
+    A ressalva fica no `alcance_mediana_A` (com --amostrar): um PROTAC que só
+    alcança o vão na conformação estendida paga entropia para fazê-lo. O teto
+    diz se é possível; a mediana, se é confortável.
+    """
+    b = rdDistGeom.GetMoleculeBoundsMatrix(protac)
+    return float(max(b[i_a][i_b], b[i_b][i_a]))
+
+
+def amostra_de_alcance(protac: Chem.Mol, i_a: int, i_b: int, n_confs: int,
+                       semente: int, otimizar: bool):
+    """Distribuição da distância entre as âncoras sobre confôrmeros.
+
+    NÃO serve para o máximo (ver acima) — serve para a mediana, que diz quanto
+    o alcance é confortável. Os H entram para a geometria ficar correta, e como
+    o `AddHs` os acrescenta no FIM, os índices dos pesados não se movem.
     """
     mol = Chem.AddHs(protac)
     ps = AllChem.ETKDGv3()
@@ -126,6 +165,11 @@ def main():
     ap.add_argument("--minimo-absoluto", type=float, default=14.0,
                     help="onde aparece a PRIMEIRA solução; entre este valor e "
                          "o requisito o candidato é marginal, não aprovado")
+    # A amostragem NÃO entra no portão (ela satura muito abaixo do alcance
+    # real) e custa ~27 s por candidato, contra 3 ms do limite. Fica opcional,
+    # para quando interessar saber se o alcance é confortável ou só possível.
+    ap.add_argument("--amostrar", action="store_true",
+                    help="medir também a mediana sobre confôrmeros (lento)")
     ap.add_argument("--confs", type=int, default=200)
     ap.add_argument("--semente", type=int, default=0xC0FFEE)
     ap.add_argument("--otimizar", action="store_true",
@@ -180,32 +224,30 @@ def main():
 
         plano = Chem.RemoveHs(protac)
         n_lig = caminho_de_ligacoes(plano, i_e3, i_wh)
-        d = alcance(protac, i_e3, i_wh, args.confs, args.semente,
-                    args.otimizar)
-        if d is None:
-            linhas.append({**base, "situacao": "não gerou confôrmero",
-                           "n_ligacoes": n_lig})
-            continue
+        alcance = limite_de_alcance(protac, i_e3, i_wh)
 
-        amax = float(d.max())
-        if amax >= args.requisito:
+        if alcance >= args.requisito:
             situacao = "alcança"
-        elif amax >= args.minimo_absoluto:
+        elif alcance >= args.minimo_absoluto:
             situacao = "marginal"
         else:
             situacao = "curto"
-        linhas.append({
+        linha = {
             **base,
-            "alcance_max_A": round(amax, 2),
-            "alcance_mediana_A": round(float(np.median(d)), 2),
-            "alcance_min_A": round(float(d.min()), 2),
-            "n_confs": len(d),
+            "alcance_A": round(alcance, 2),
             "n_ligacoes": n_lig,
-            "alcance_teto_A": round(n_lig * ANGSTROM_POR_LIGACAO, 1),
             "situacao": situacao,
             "protac_mw": getattr(r, "protac_mw", None),
             "protac_rotb": getattr(r, "protac_rotb", None),
-        })
+        }
+        if args.amostrar:
+            d = amostra_de_alcance(protac, i_e3, i_wh, args.confs,
+                                   args.semente, args.otimizar)
+            if d is not None:
+                linha["alcance_mediana_A"] = round(float(np.median(d)), 2)
+                linha["alcance_amostrado_max_A"] = round(float(d.max()), 2)
+                linha["n_confs"] = len(d)
+        linhas.append(linha)
         if n % 25 == 0:
             print(f"  {n}/{len(df)}...", flush=True)
 
@@ -216,23 +258,22 @@ def main():
     # nesta série a taxa observada é ~0,98 Å/ligação. Usar 1,27 aqui subestima
     # o que falta — e o número existe justamente para escolher linker no
     # catálogo, onde errar por baixo devolve o mesmo zero do PatchDock.
-    if "alcance_max_A" in res.columns:
-        val = res.dropna(subset=["alcance_max_A", "n_ligacoes"])
-        taxa = float(np.median(val["alcance_max_A"] / val["n_ligacoes"])) \
+    if "alcance_A" in res.columns:
+        val = res.dropna(subset=["alcance_A", "n_ligacoes"])
+        taxa = float(np.median(val["alcance_A"] / val["n_ligacoes"])) \
             if len(val) else ANGSTROM_POR_LIGACAO
         res["ligacoes_faltando"] = np.where(
-            res["alcance_max_A"].notna(),
-            np.ceil((args.requisito - res["alcance_max_A"]).clip(lower=0)
+            res["alcance_A"].notna(),
+            np.ceil((args.requisito - res["alcance_A"]).clip(lower=0)
                     / taxa), np.nan)
         print(f"\n  taxa medida: {taxa:.2f} Å por ligação de cadeia "
               f"(teórica, cadeia anti: {ANGSTROM_POR_LIGACAO})")
-        print(f"  ela cai com o comprimento — cadeia longa se enrola — então"
-              f" tome\n  'ligacoes_faltando' como estimativa para garimpar o "
-              f"catálogo,\n  não como previsão: os candidatos novos se medem.")
+        print(f"  ('ligacoes_faltando' usa essa taxa; é estimativa para "
+              f"garimpar o\n  catálogo — os candidatos novos se medem, em 3 ms "
+              f"cada.)")
 
-    if "alcance_max_A" in res.columns:
-        res = res.sort_values("alcance_max_A", ascending=False,
-                              na_position="last")
+    if "alcance_A" in res.columns:
+        res = res.sort_values("alcance_A", ascending=False, na_position="last")
     out = args.out.expanduser()
     out.parent.mkdir(parents=True, exist_ok=True)
     res.to_csv(out, index=False)
@@ -247,9 +288,8 @@ def main():
         if k not in ("alcança", "marginal", "curto"):
             print(f"    {k}: {v}")
 
-    mostrar = [c for c in ("candidate_id", "alcance_max_A",
-                           "alcance_mediana_A", "n_ligacoes",
-                           "alcance_teto_A", "ligacoes_faltando",
+    mostrar = [c for c in ("candidate_id", "alcance_A", "n_ligacoes",
+                           "alcance_mediana_A", "ligacoes_faltando",
                            "protac_mw", "protac_rotb", "situacao")
                if c in res.columns]
     print(f"\n  os 15 de maior alcance:")

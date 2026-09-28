@@ -104,10 +104,19 @@ def main():
     # --- portão geométrico, antes de qualquer pontuação -------------------
     if args.span and args.span.expanduser().exists():
         sp = pd.read_csv(args.span.expanduser())
-        col = "alcance_max_A"
+        # `alcance_A` é o limite de distance-geometry. A coluna antiga
+        # (`alcance_max_A`, máximo sobre confôrmeros) saturava abaixo do
+        # alcance real e reprovava candidato que o PRosettaC aceita — um CSV
+        # daquela época não deve passar por aqui como se fosse equivalente.
+        col = "alcance_A"
         if col not in sp.columns:
-            print(f"  [aviso] {args.span.name} sem coluna {col}: portão "
-                  f"geométrico NÃO aplicado")
+            antiga = "alcance_max_A" in sp.columns
+            raise SystemExit(
+                f"  {args.span.name} não tem a coluna {col}.\n"
+                + ("  Ele é de uma versão anterior do linker_span.py, cujo\n"
+                   "  estimador subestimava o alcance. Refaça a medição (1 s):\n"
+                   "    python linker_span.py ...\n" if antiga else
+                   "  Refaça a medição com o linker_span.py atual.\n"))
         else:
             df = df.merge(sp[["candidate_id", col, "n_ligacoes"]],
                           on="candidate_id", how="left")
@@ -165,7 +174,7 @@ def main():
     df.to_csv(out, index=False)
 
     mostrar = [c for c in ("rank", "candidate_id", "r1", "r2", "r3",
-                           "protac_mw", "protac_rotb", "alcance_max_A",
+                           "protac_mw", "protac_rotb", "alcance_A",
                            "ligand_efficiency",
                            "frac_sem_clash", "std_score", "score_composto")
                if c in df.columns]
