@@ -43,6 +43,10 @@ from pathlib import Path
 
 CAMPOS_DE_ENTRADA = ("Structures", "Heads", "Protac", "Linkers")
 SUFIXOS_PRESERVADOS = (".bak", ".velho")
+# Arquivos que NÓS escrevemos. Saem junto, mas não são etapa pulada do
+# PRosettaC — dizer que um log de zero byte fez pular uma etapa seria inventar
+# um mecanismo, e a saída deste script é lida como diagnóstico.
+NOSSOS = ("run_prosettac.log", ".heads.out", ".ancoras.out")
 
 
 def entradas_declaradas(cfg: Path) -> set[str]:
@@ -99,8 +103,12 @@ def main():
             print(f"    {p.name}/  ({n} arquivos)")
         else:
             tam = p.stat().st_size
-            aviso = "   <- ZERO BYTES, e é por isso que a etapa era pulada" \
-                if tam == 0 else ""
+            if p.name in NOSSOS:
+                aviso = "   <- log da tentativa anterior, nosso"
+            elif tam == 0:
+                aviso = "   <- ZERO BYTES, e é por isso que a etapa era pulada"
+            else:
+                aviso = ""
             print(f"    {p.name}  ({tam} bytes){aviso}")
 
     if not args.aplicar:
