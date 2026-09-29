@@ -105,6 +105,22 @@ def main():
     minimo = next((d for d, t in uteis if t > 0), None)
     util = next((d for d, t in uteis if t >= args.transformadas_uteis), None)
 
+    # O primeiro ponto já com transformadas significa que o piso REAL está
+    # abaixo da faixa varrida: o número reportado é um limite superior, não a
+    # medida. Conservador na direção certa (exige mais alcance do que talvez
+    # baste), mas dizer "vão mínimo = 10 Å" quando não se olhou abaixo de 10
+    # seria afirmar o que não foi medido.
+    if uteis and uteis[0][1] > 0:
+        piso_nao_medido = True
+        print(f"\n  [ATENÇÃO] o ponto mais baixo da varredura ({uteis[0][0]:.0f} Å) "
+              f"já tem {uteis[0][1]} transformadas.")
+        print(f"  O piso real está ABAIXO disso e não foi medido. Os números a"
+              f" seguir são\n  limites superiores: varra distâncias menores para"
+              f" achar o piso — um vão\n  menor admite linker mais curto, e"
+              f" linker mais curto é massa molecular\n  que não se gasta.")
+    else:
+        piso_nao_medido = False
+
     if minimo is None:
         raise SystemExit(
             "\n  Nenhuma distância abaixo do controle produziu transformada.\n"
@@ -120,6 +136,7 @@ def main():
 
     d = {
         "vao_minimo_A": round(minimo, 1),
+        "piso_abaixo_da_varredura": piso_nao_medido,
         "vao_util_A": round(util, 1),
         "transformadas_uteis": args.transformadas_uteis,
         "razao_mediana_teto": args.razao,
@@ -141,7 +158,9 @@ def main():
                                                 ensure_ascii=False) + "\n")
 
     print()
-    print(f"  vão mínimo (1a transformada) .......... {d['vao_minimo_A']} Å")
+    print(f"  vão mínimo (1a transformada) .......... {d['vao_minimo_A']} Å"
+          + ("   <- limite superior; o piso não foi medido" if piso_nao_medido
+             else ""))
     print(f"  vão útil ({args.transformadas_uteis}+ transformadas) ......... "
           f"{d['vao_util_A']} Å")
     print(f"  ALCANCE EXIGIDO do linker (com folga) . {d['alcance_exigido_A']} Å")
