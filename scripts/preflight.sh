@@ -123,7 +123,16 @@ for E3 in ${WP1_E3_LIST:-}; do
                   || bloq "  triagem (docking) da $E3 ausente em ${WP1_SCREENING:-}"
 done
 
-secao "fase 4b — vão exigido pelo par E3/alvo (o portão novo)"
+# O detalhe de quem produz o quê é do check_wp1.py, que importa as funções do
+# wp1_select_recruiter e por isso responde a pergunta certa: não "existe uma
+# pasta VHL", mas "o seletor encontraria o que precisa dentro dela".
+echo
+echo "  detalhe do WP1 (poses, colunas do CSV, cadeias do receptor):"
+echo "    conda run -n ${ENV_MDTOOLS:-mdtools} python $AQUI/check_wp1.py \\"
+echo "        --screening ${WP1_SCREENING:-} --prep ${WP1_PREP:-} \\"
+echo "        --e3 ${WP1_E3_LIST:-} ${ANCHORS_SDF:+--anchors-sdf ${ANCHORS_SDF}}"
+
+secao "fase 6a — vão exigido pelo par E3/alvo (o portão novo)"
 if [[ -s "${PIPELINE_OUT:-}/span_requirement.json" ]]; then
   ok "já medido: $(python3 -c "
 import json;d=json.load(open('${PIPELINE_OUT}/span_requirement.json'))
