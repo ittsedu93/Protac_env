@@ -75,9 +75,34 @@ exige() {  # exige <variável> <mensagem>
   fi
 }
 
+# A ORDEM das fases vive aqui, e é ela que o --from respeita. É uma LISTA e não
+# uma contagem porque 4b e 6b entraram depois, entre fases que já tinham
+# marcador no disco: renumerar invalidaria os `.done_N` de quem já rodou, e um
+# pipeline que se esquece do que fez refaz 46 h de MD.
+#
+# 6a e 6b são os portões que este projeto aprendeu a ter, e a POSIÇÃO deles é o
+# ponto: medir o vão que o par E3/alvo exige, e reprovar quem não alcança, ANTES
+# da MD. Com a CRBN os dois vieram depois, e o candidato que consumiu 46 h de MD
+# era geometricamente impossível desde o começo.
+#
+# A 6a fica depois da montagem porque quem produz o Init0/Init1 que a medição
+# usa é a preparação do PRosettaC, e ela precisa de um candidato. Não dá para
+# medir antes de existir um PROTAC — mas dá, e é o que importa, para medir antes
+# de gastar MD.
+FASES=(1 2 3 4 5 6 6a 6b 7 8 9)
+
+indice_da_fase() {
+  local alvo="$1" i=0
+  for f in "${FASES[@]}"; do
+    [[ "$f" == "$alvo" ]] && { echo "$i"; return 0; }
+    i=$((i+1))
+  done
+  echo "-1"
+}
+
 if [[ "${LIST:-0}" == "1" ]]; then
   echo "Fases concluídas:"
-  for n in 1 2 3 4 5 6 7 8; do
+  for n in "${FASES[@]}"; do
     if is_done "$n"; then echo "  [x] fase $n  ($(cat "$(done_marker "$n")"))"
     else echo "  [ ] fase $n"; fi
   done
@@ -87,7 +112,14 @@ fi
 quer() {  # quer <n> -> deve rodar esta fase?
   local n="$1"
   [[ -n "$ONLY" ]] && { [[ "$ONLY" == "$n" ]]; return; }
-  (( n >= FROM )) && ! is_done "$n"
+  local i_n i_from
+  i_n=$(indice_da_fase "$n")
+  i_from=$(indice_da_fase "$FROM")
+  if [[ "$i_from" == "-1" ]]; then
+    echo "*** --from $FROM não é uma fase. As fases são: ${FASES[*]}" >&2
+    exit 1
+  fi
+  (( i_n >= i_from )) && ! is_done "$n"
 }
 
 log "pipeline iniciado $(date -Is)"
@@ -286,14 +318,110 @@ else
 fi
 
 # ===========================================================================
+# FASE 6a — quanto o par E3/alvo EXIGE de alcance (minutos)
+# ===========================================================================
+# Este é o portão que faltava. Ele mede, com o PatchDock sobre as duas poses
+# validadas, a distância mínima entre os átomos de conjugação para existir
+# alguma colocação das duas proteínas — e a distância a partir da qual existem
+# soluções SUFICIENTES. Com a CRBN: 14 Å davam UMA transformada, 18 Å davam 40.
+if quer 6a; then
+  head_ 6a "Vão exigido pelo par E3/alvo — PatchDock (~30 min)"
+
+  CANDS="$PIPELINE_OUT/wp3/protac_candidates.csv"
+  [[ -s "$CANDS" ]] || { log "*** $CANDS não existe: rode a fase 6"; exit 1; }
+  # A sonda é um candidato qualquer: o que se mede aqui é geometria das duas
+  # PROTEÍNAS, e o PROTAC da sonda só define a restrição de distância — que a
+  # varredura sobrescreve ponto a ponto.
+  SONDA=$(python3 -c "
+import csv,sys
+r=list(csv.DictReader(open('$CANDS')))
+print(r[0]['candidate_id'] if r else '')")
+  [[ -n "$SONDA" ]] || { log "*** nenhum candidato em $CANDS"; exit 1; }
+  log "  sonda: $SONDA  (mede as proteínas, não o PROTAC dela)"
+
+  if [[ $DRY -eq 0 ]]; then
+    PIPELINE_OUT="$PIPELINE_OUT" PROSETTAC_DIR="$PROSETTAC_DIR" \
+      bash "$REPO/scripts/prosettac_prepare.sh" "$SONDA" 2>&1 | tee -a "$LOG" \
+      || { log "*** a preparação do PRosettaC não produziu Init0/Init1."; exit 1; }
+    PIPELINE_OUT="$PIPELINE_OUT" \
+      bash "$REPO/scripts/patchdock_span_scan.sh" "$SONDA" \
+        ${SPAN_DISTANCIAS:-10 12 14 16 18 20 22 25 28 32 100} 2>&1 | tee -a "$LOG" \
+      || { log "*** a varredura do PatchDock falhou."; exit 1; }
+  fi
+
+  SCAN="$PIPELINE_OUT/wp3/span_scan_${SONDA}.csv"
+  run_in "$ENV_MDTOOLS" python "$REPO/scripts/span_requirement.py" \
+      --scan "$SCAN" \
+      --transformadas-uteis "${SPAN_TRANSFORMADAS_UTEIS:-20}" \
+      --razao "${SPAN_RAZAO_MEDIANA_TETO:-0.64}" \
+      --out "$PIPELINE_OUT/span_requirement.json"
+  mark_done 6a
+else
+  log "\n[fase 6a pulada]"
+fi
+
+# --- lê o requisito medido; daqui para baixo ele é critério, não palpite ----
+REQ_JSON="$PIPELINE_OUT/span_requirement.json"
+SPAN_MIN=""
+if [[ -f "$REQ_JSON" ]]; then
+  SPAN_MIN=$(python3 -c "import json;print(json.load(open('$REQ_JSON'))['alcance_exigido_A'])")
+  SPAN_LIG=$(python3 -c "import json;print(json.load(open('$REQ_JSON'))['ligacoes_minimas'])")
+  log "\nalcance exigido: $SPAN_MIN Å  (~$SPAN_LIG ligações de cadeia)"
+fi
+
+# ===========================================================================
+# FASE 6b — portão de alcance: quem não vence o vão não vai para a MD
+# ===========================================================================
+if quer 6b; then
+  head_ 6b "Portão de alcance dos PROTACs montados (segundos)"
+  exige SPAN_MIN "Alcance exigido — sai da fase 6a, em span_requirement.json"
+
+  run_in "$ENV_MDTOOLS" python "$REPO/scripts/linker_span.py" \
+      --protacs "$PIPELINE_OUT/wp3/protac_candidates.csv" \
+      --e3-head "$E3_RECRUITER_SDF" \
+      --warheads-sdf "$DOCKING_DIR/docking/heads_pcsk9" \
+      --requisito "$SPAN_MIN" \
+      --minimo-absoluto "$(python3 -c "import json;print(json.load(open('$REQ_JSON'))['vao_util_A'])")" \
+      --out "$PIPELINE_OUT/wp3/linker_span.csv"
+
+  # O portão reprova, e reprovar aqui é o serviço dele. Zero aprovados NÃO é
+  # falha do pipeline: é a resposta de que o pool de linkers é curto para este
+  # par de sítios — e agora com um número para refiltrar, em vez de intuição.
+  N_OK=$(python3 -c "
+import csv
+print(sum(1 for r in csv.DictReader(open('$PIPELINE_OUT/wp3/linker_span.csv'))
+          if r.get('situacao') == 'alcança'))" 2>/dev/null || echo 0)
+  log "  candidatos que alcançam $SPAN_MIN Å: $N_OK"
+  if [[ "${N_OK:-0}" -eq 0 && $DRY -eq 0 ]]; then
+    log ""
+    log "*** NENHUM candidato alcança o vão exigido. O pipeline para AQUI, e"
+    log "*** isto é o portão funcionando: com a CRBN, um candidato nesta mesma"
+    log "*** situação consumiu 46 h de MD antes de o PatchDock devolver zero."
+    log "***"
+    log "*** A decisão é da fase 5: refiltre o catálogo Chemspace exigindo"
+    log "*** cadeia de ~$SPAN_LIG ligações ou mais entre os pontos de"
+    log "*** conjugação, e relance com --from 5."
+    log "***   LINKER_ATOM_MIN=$SPAN_LIG em $CONF"
+    exit 3
+  fi
+  mark_done 6b
+else
+  log "\n[fase 6b pulada]"
+fi
+
+# ===========================================================================
 # FASE 7 — ranquear os PROTACs e escolher o candidato da MD
 # ===========================================================================
 if quer 7; then
   head_ 7 "Ranquear os PROTACs (segundos)"
+  # O --span ELIMINA quem não alcança, em vez de dar nota baixa: um PROTAC que
+  # não vence o vão não é pior, é impossível. Sem o --span o rank_protacs avisa,
+  # alto, que não está verificando isso.
   run_in "$ENV_MDTOOLS" python "$REPO/scripts/rank_protacs.py" \
       --protacs "$PIPELINE_OUT/wp3/protac_candidates.csv" \
       --warhead-ranking "${RANKING:-$PIPELINE_OUT/warhead_ranking.csv}" \
       --subcomplexes "$PIPELINE_OUT/wp2/subcomplexes_manifest.json" \
+      ${SPAN_MIN:+--span "$PIPELINE_OUT/wp3/linker_span.csv" --span-min "$SPAN_MIN"} \
       --out "$PIPELINE_OUT/protac_ranking.csv"
   mark_done 7
 else
@@ -330,13 +458,117 @@ else
 fi
 
 # ===========================================================================
+# FASE 9 — complexo ternário: PRosettaC e o portão de concordância (horas)
+# ===========================================================================
+# Com a CRBN esta fase era manual, e foi onde tudo parou. Agora ela roda sozinha
+# e, o que importa mais, ela tem VEREDITO: sem um grupo de modelos concordando,
+# não existe pose, e não há MD nível (iii) a fazer.
+if quer 9; then
+  head_ 9 "Complexo ternário — PRosettaC + concordância (horas)"
+
+  RANK="$PIPELINE_OUT/protac_ranking.csv"
+  [[ -s "$RANK" ]] || { log "*** $RANK não existe: rode a fase 7"; exit 1; }
+  CAND=$(python3 -c "
+import csv
+r=list(csv.DictReader(open('$RANK')))
+i=min(max(int('${MD_RANK:-1}')-1,0),len(r)-1) if r else 0
+print(r[i]['candidate_id'] if r else '')")
+  [[ -n "$CAND" ]] || { log "*** ranking vazio"; exit 1; }
+  log "  candidato: $CAND"
+
+  DIRC=$(find "$PIPELINE_OUT" -maxdepth 5 -type d -name "$CAND" 2>/dev/null | head -1)
+  if [[ -z "$DIRC" ]]; then
+    log "*** não achei o diretório do job de $CAND — a fase 6 emite os configs"
+    exit 1
+  fi
+
+  if [[ -d "$DIRC/Results" ]]; then
+    log "  já há Results — pulando direto para a concordância"
+  elif [[ $DRY -eq 0 ]]; then
+    # O run_prosettac.sh valida, conserta head e âncora, e lança DESTACADO —
+    # então aqui é preciso esperar o resultado, e não o lançamento.
+    PIPELINE_OUT="$PIPELINE_OUT" PROSETTAC_DIR="$PROSETTAC_DIR" \
+      bash "$REPO/scripts/run_prosettac.sh" "$CAND" 2>&1 | tee -a "$LOG" \
+      || { log "*** o PRosettaC não subiu; o log acima diz por quê"; exit 1; }
+
+    LIMITE_H="${TERNARIO_LIMITE_H:-24}"
+    log "\n  esperando o Results (limite de ${LIMITE_H} h)..."
+    pronto=0
+    for _ in $(seq 1 $((LIMITE_H * 12))); do
+      sleep 300
+      [[ -d "$DIRC/Results" ]] && { pronto=1; break; }
+      # morreu no meio: o log.txt do PRosettaC diz a última etapa alcançada
+      if ! pgrep -u "${USER:-$(id -un)}" -f "PRosettaC.*main\.py" >/dev/null \
+         && [[ -f "$DIRC/log.txt" ]] \
+         && grep -q "run has finished" "$DIRC/log.txt"; then
+        break
+      fi
+    done
+    if [[ $pronto -eq 0 ]]; then
+      log "\n  o PRosettaC terminou sem Results. Últimas linhas do log.txt:"
+      tail -6 "$DIRC/log.txt" 2>/dev/null | sed 's/^/      /' | tee -a "$LOG"
+      log ""
+      log "*** Sem modelos ternários não há o que levar à MD nível (iii)."
+      log "*** O resumo em result_summary.txt diz quantos modelos passaram o"
+      log "*** limiar de energia — 3% significa ponte tensa (volte à fase 5 com"
+      log "*** mais folga de alcance), e 10%+ com dispersão significa que a"
+      log "*** interface não é definida por este método (troque de E3 ou sítio)."
+      exit 4
+    fi
+  fi
+
+  [[ -s "$DIRC/result_summary.txt" ]] && sed 's/^/  /' "$DIRC/result_summary.txt" \
+    | tee -a "$LOG"
+
+  run_in "$ENV_MDTOOLS" python "$REPO/scripts/prosettac_agreement.py" \
+      --candidato "$CAND" --work "$(dirname "$DIRC")" \
+      --corte "${TERNARIO_CORTE_A:-5.0}"
+
+  # O veredito: um grupo de modelos concordando é pose; dois modelos não são.
+  MAIOR=$(python3 -c "
+import csv, itertools, math
+import numpy as np
+f='$DIRC/concordancia_clusters.csv'
+rows=list(csv.reader(open(f)))
+nomes=rows[0][1:]
+M=np.full((len(nomes),len(nomes)), np.nan)
+for i,r in enumerate(rows[1:]):
+    for j,v in enumerate(r[1:]):
+        if v: M[i,j]=float(v)
+A=(M<=${TERNARIO_CORTE_A:-5.0}) & ~np.eye(len(nomes),dtype=bool) & ~np.isnan(M)
+melhor=[]
+def exp(at,ca):
+    global melhor
+    if len(at)>len(melhor): melhor=list(at)
+    for k,v in enumerate(ca):
+        if len(at)+len(ca)-k<=len(melhor): return
+        exp(at+[v],[u for u in ca[k+1:] if A[v,u]])
+exp([],list(range(len(nomes))))
+print(len(melhor))" 2>/dev/null || echo 0)
+  log "\n  maior grupo concordando a ${TERNARIO_CORTE_A:-5.0} Å: ${MAIOR:-?} modelos"
+  if [[ "${MAIOR:-0}" -lt "${TERNARIO_GRUPO_MIN:-5}" && $DRY -eq 0 ]]; then
+    log ""
+    log "*** Os modelos NÃO convergem numa interface (${MAIOR:-0} < ${TERNARIO_GRUPO_MIN:-5})."
+    log "*** Isto é resultado, não falha: nenhuma pose ternária testável saiu"
+    log "*** daqui, e levar uma pose arbitrária à MD nível (iii) seria simular"
+    log "*** uma hipótese escolhida por acaso."
+    log "*** Próximo candidato: MD_RANK=$(( ${MD_RANK:-1} + 1 )) em $CONF, --from 9."
+    exit 5
+  fi
+  mark_done 9
+else
+  log "\n[fase 9 pulada]"
+fi
+
+# ===========================================================================
 log "\n$(printf '=%.0s' {1..70})"
 log "PIPELINE CONCLUÍDO  $(date -Is)"
 log "$(printf '=%.0s' {1..70})"
 log "\nSaídas em $PIPELINE_OUT"
 log "\nO que exige julgamento humano e NÃO foi automatizado:"
-log "  - disparar os jobs do PRosettaC: rode UM antes do lote e confira o"
-log "    'Anchor atoms' (0-based vs 1-based varia por build)"
-log "  - submeter os JSONs do AlphaFold 3 em alphafoldserver.com"
-log "  - inspecionar as poses no ChimeraX antes de comprometer dias de MD"
+log "  - submeter os JSONs do AlphaFold 3 em alphafoldserver.com (o Boltz-2"
+log "    local cobre a via ortogonal; o AF3 é confirmação independente)"
+log "  - inspecionar no ChimeraX a pose ternária aprovada, antes da MD (iii)"
+log "  - decidir trocar de E3 ou de sítio quando a fase 9 reprovar: o número"
+log "    está medido, a decisão de projeto é sua"
 log "$LOG"
