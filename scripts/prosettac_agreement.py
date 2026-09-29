@@ -89,6 +89,10 @@ def main():
                     / "prosettac")
     ap.add_argument("--corte", type=float, default=5.0,
                     help="Å abaixo do qual dois modelos concordam")
+    # Com 105 clusters de um membro cada, comparar todos é comparar ruído — e
+    # imprimir 105x105 é ilegível. Entram os maiores, que são os que importam.
+    ap.add_argument("--max-clusters", type=int, default=30,
+                    help="quantos clusters comparar, os de mais membros antes")
     args = ap.parse_args()
 
     base = args.work.expanduser() / args.candidato
@@ -114,10 +118,25 @@ def main():
     if len(modelos) < 2:
         raise SystemExit(f"achei {len(modelos)} modelo(s) — preciso de 2")
 
-    nomes = list(modelos)
-    print(f"  {len(nomes)} clusters, {sum(membros.values())} modelos no total")
-    print(f"  membros por cluster: "
-          f"{', '.join(str(membros[n]) for n in nomes)}")
+    total_clusters, total_modelos = len(modelos), sum(membros.values())
+    # os maiores primeiro: um cluster de 8 membros diz mais que oito de um
+    nomes = sorted(modelos, key=lambda n: (-membros[n], n))
+    cortados = 0
+    if len(nomes) > args.max_clusters:
+        cortados = len(nomes) - args.max_clusters
+        nomes = nomes[:args.max_clusters]
+    print(f"  {total_clusters} clusters, {total_modelos} modelos no total")
+    print(f"  membros dos maiores: "
+          f"{', '.join(str(membros[n]) for n in nomes[:12])}"
+          + (" ..." if len(nomes) > 12 else ""))
+    com_massa = [n for n in modelos if membros[n] >= 5]
+    if com_massa:
+        print(f"  cluster(s) com 5+ membros: "
+              + ", ".join(f"{n} ({membros[n]})" for n in com_massa))
+    if cortados:
+        print(f"  comparando os {len(nomes)} maiores "
+              f"({cortados} de 1 membro ficaram de fora — use "
+              f"--max-clusters para incluir)")
     print()
 
     M = np.full((len(nomes), len(nomes)), np.nan)
@@ -134,13 +153,18 @@ def main():
             M[i, j] = M[j, i] = float(np.sqrt(np.mean(
                 np.sum((ta_al - tb) ** 2, axis=1))))
 
-    larg = max(len(n) for n in nomes) + 2
-    print(" " * (larg + 3) + " ".join(f"{i:>6d}" for i in range(len(nomes))))
-    for i, n in enumerate(nomes):
-        print(f"{i:>2d} {n:<{larg}}" + " ".join(
-            "     ." if i == j else
-            ("   n/a" if np.isnan(M[i, j]) else f"{M[i, j]:6.1f}")
-            for j in range(len(nomes))))
+    if len(nomes) <= 24:
+        larg = max(len(n) for n in nomes) + 2
+        print(" " * (larg + 3) + " ".join(f"{i:>6d}"
+                                          for i in range(len(nomes))))
+        for i, n in enumerate(nomes):
+            print(f"{i:>2d} {n:<{larg}}" + " ".join(
+                "     ." if i == j else
+                ("   n/a" if np.isnan(M[i, j]) else f"{M[i, j]:6.1f}")
+                for j in range(len(nomes))))
+    else:
+        print(f"  ({len(nomes)}x{len(nomes)} não cabe na tela — está no CSV"
+              f" do fim)")
 
     fora = M[~np.eye(len(nomes), dtype=bool)]
     fora = fora[~np.isnan(fora)]
@@ -163,8 +187,19 @@ def main():
         A = (M <= corte) & ~np.eye(len(nomes), dtype=bool) & ~np.isnan(M)
         melhor: list[int] = []
 
+        # Orçamento de chamadas: a busca exata é exponencial, e com 30 nós num
+        # grafo denso ela não termina. Estourando, devolve o melhor encontrado
+        # até ali e AVISA — um número silenciosamente aproximado num veredito
+        # seria pior que um número menor declarado.
+        orcamento = [400_000]
+        estourou = [False]
+
         def expandir(atual, cands):
             nonlocal melhor
+            if orcamento[0] <= 0:
+                estourou[0] = True
+                return
+            orcamento[0] -= 1
             if len(atual) > len(melhor):
                 melhor = list(atual)
             for i, v in enumerate(cands):
@@ -173,16 +208,17 @@ def main():
                 expandir(atual + [v], [u for u in cands[i + 1:] if A[v, u]])
 
         expandir([], list(range(len(nomes))))
-        return melhor
+        return melhor, estourou[0]
 
     # Um corte só responde à pergunta errada: a 5 Å tudo parece disperso, a
     # 20 Å tudo parece junto. A varredura mostra a FORMA da concordância.
     print(f"\n  maior grupo mutuamente próximo, por corte:")
     grupos = {}
     for corte in (args.corte, args.corte * 2, args.corte * 3, args.corte * 4):
-        g = maior_grupo(corte)
+        g, aprox = maior_grupo(corte)
         grupos[corte] = g
         print(f"    {corte:>5.0f} Å   {len(g):>2} modelo(s)"
+              + ("  (mínimo: busca truncada)" if aprox else "")
               + (f"   {', '.join(nomes[k] for k in g)}" if 1 < len(g) <= 8
                  else ""))
     maior = len(grupos[args.corte])
@@ -210,12 +246,16 @@ def main():
         print("     apertado e por isso os separou — mas a região é uma só, e")
         print("     ela é candidata a pose para a MD nível (iii).")
     else:
-        print(f"  -> Concordância PARCIAL: o maior grupo tem {maior} modelos.")
-        print("     Não sustenta uma pose única, e sustenta menos ainda um")
-        print("     veredito de ausência. O que falta é amostragem — e a causa")
-        print("     provável está no linker no limite do alcance: modelo que só")
-        print("     fecha a ponte estendido paga energia, e foi a energia que")
-        print("     cortou 658 soluções para 21.")
+        print(f"  -> Concordância PARCIAL: o maior grupo tem {maior} modelos"
+               f" de {len(nomes)}.")
+        print("     Não sustenta uma pose única para a MD, e sustenta menos")
+        print("     ainda um veredito de ausência. Duas causas possíveis, e a")
+        print("     primeira linha do result_summary.txt separa as duas:")
+        print("       amostragem rala (poucos modelos passando a energia) ->")
+        print("         tensão do linker; escolha pose com mais folga de vão")
+        print("       amostragem boa e ainda disperso -> a interface em si não")
+        print("         é definida por este método, e o próximo passo é outra")
+        print("         E3 ou outro sítio, não mais amostragem")
 
     saida = base / "concordancia_clusters.csv"
     with open(saida, "w", newline="") as fh:
