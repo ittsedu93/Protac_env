@@ -154,29 +154,53 @@ def main():
           f"| maior {fora.max():.1f}")
     print(f"    {proximos} de {total} pares a menos de {args.corte:.0f} Å")
 
-    # o maior grupo mutuamente próximo: é ele que seria "o cluster" se o
-    # limiar do PRosettaC fosse o desta medida
-    perto = (M <= args.corte) & ~np.isnan(M)
-    maior, quem = 0, []
-    for i in range(len(nomes)):
-        grupo = [i] + [j for j in range(len(nomes)) if j != i and perto[i, j]]
-        # mutuamente próximos, não só próximos do centro
-        grupo = [k for k in grupo
-                 if all(k == m or perto[k, m] for m in grupo)]
-        if len(grupo) > maior:
-            maior, quem = len(grupo), grupo
-    print(f"    maior grupo mutuamente a menos de {args.corte:.0f} Å: "
-          f"{maior} modelo(s)")
-    if maior > 1:
-        print(f"      {', '.join(nomes[k] for k in quem)}")
+    # O maior grupo MUTUAMENTE próximo — o que seria "o cluster" se o limiar
+    # do PRosettaC fosse o desta medida. Isto é clique máxima, e a primeira
+    # versão daqui fazia busca gulosa a partir de cada vértice: com 20 modelos
+    # a busca exaustiva custa milissegundos e não erra, então não há motivo
+    # para aproximar.
+    def maior_grupo(corte: float):
+        A = (M <= corte) & ~np.eye(len(nomes), dtype=bool) & ~np.isnan(M)
+        melhor: list[int] = []
+
+        def expandir(atual, cands):
+            nonlocal melhor
+            if len(atual) > len(melhor):
+                melhor = list(atual)
+            for i, v in enumerate(cands):
+                if len(atual) + len(cands) - i <= len(melhor):
+                    return
+                expandir(atual + [v], [u for u in cands[i + 1:] if A[v, u]])
+
+        expandir([], list(range(len(nomes))))
+        return melhor
+
+    # Um corte só responde à pergunta errada: a 5 Å tudo parece disperso, a
+    # 20 Å tudo parece junto. A varredura mostra a FORMA da concordância.
+    print(f"\n  maior grupo mutuamente próximo, por corte:")
+    grupos = {}
+    for corte in (args.corte, args.corte * 2, args.corte * 3, args.corte * 4):
+        g = maior_grupo(corte)
+        grupos[corte] = g
+        print(f"    {corte:>5.0f} Å   {len(g):>2} modelo(s)"
+              + (f"   {', '.join(nomes[k] for k in g)}" if 1 < len(g) <= 8
+                 else ""))
+    maior = len(grupos[args.corte])
+    quem = grupos[args.corte]
+    no_dobro = len(grupos[args.corte * 2])
 
     print()
-    if fora.min() > 10:
-        print("  -> NENHUM par concorda. Os 20 clusters são 20 interfaces")
-        print("     incompatíveis, não uma região amostrada grosso. O")
-        print("     PRosettaC não encontrou a geometria ternária deste par —")
-        print("     e isso confirma, por um método independente, o que o")
-        print("     Boltz-2 já havia indicado.")
+    # O veredito sai do TAMANHO do grupo, não da menor distância da matriz. A
+    # versão anterior exigia `menor > 10 Å` para declarar ausência de
+    # concordância, e com menor = 5,4 Å (um único par, e ainda fora do corte)
+    # ela caiu em "falta amostragem" onde o certo era "não convergiu".
+    if maior <= 1 and no_dobro <= 3:
+        print(f"  -> NÃO CONVERGIU. Nenhum par a menos de {args.corte:.0f} Å, e mesmo")
+        print(f"     dobrando o corte o maior grupo tem {no_dobro} de {len(nomes)} modelos.")
+        print("     Uma interface convergente daria um grupo de metade dos")
+        print("     modelos no corte original. O PRosettaC não encontrou a")
+        print("     geometria ternária deste par — e isso confirma, por um")
+        print("     método independente, o que o Boltz-2 já indicava.")
     elif maior >= 5 or maior == len(nomes):
         # `maior == len(nomes)` cobre o caso de poucos clusters: com 3 modelos
         # todos concordando, exigir 5 daria "parcial" para uma concordância
