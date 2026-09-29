@@ -75,6 +75,43 @@ if [[ -d Results || -d results ]]; then
   exit 0
 fi
 
+# E um resultado EM ANDAMENTO também não é resto. Esta guarda não existia, e a
+# ausência dela apagou 1490 arquivos de um Patchdock_Results que estava sendo
+# escrito naquele instante, e lançou um segundo PRosettaC sobre o mesmo
+# diretório. "Não há Results ainda" não é o mesmo que "não há nada rodando".
+usuario_atual="${USER:-$(id -un)}"
+em_andamento=""
+pgrep -u "$usuario_atual" -f "PRosettaC.*main\.py" > /dev/null \
+  && em_andamento="processo main.py vivo"
+if [[ -z "$em_andamento" ]] \
+   && squeue -h -u "$usuario_atual" --name=PRosetta 2>/dev/null | grep -q .; then
+  em_andamento="jobs do PRosettaC na fila"
+fi
+# Terceiro sinal, para o caso de o processo estar num nó que o pgrep local não
+# vê: arquivo escrito neste diretório nos últimos 15 minutos.
+if [[ -z "$em_andamento" ]] \
+   && [[ -n "$(find . -maxdepth 2 -type f -newermt '-15 minutes' \
+                   ! -name 'prosetta_config.txt*' ! -name '.*' 2>/dev/null | head -1)" ]]; then
+  em_andamento="arquivo escrito aqui nos últimos 15 min"
+fi
+
+if [[ -n "$em_andamento" && "${PROSETTAC_FORCAR:-0}" != "1" ]]; then
+  echo "  [JÁ ESTÁ RODANDO] $em_andamento"
+  echo
+  echo "  Não vou limpar nem relançar: a limpeza apagaria o que essa execução"
+  echo "  está escrevendo, e um segundo PRosettaC no mesmo diretório embaralha"
+  echo "  os dois. Para acompanhar:"
+  echo "    python $AQUI/prosettac_progress.py --candidato $CAND"
+  echo "    tail -3 $DIR/log.txt"
+  echo
+  echo "  Se você TEM certeza de que o que está rodando é lixo e quer"
+  echo "  recomeçar, mate primeiro e só então force:"
+  echo "    pkill -u $usuario_atual -f 'PRosettaC.*main\.py'"
+  echo "    scancel -u $usuario_atual --jobname=PRosetta"
+  echo "    PROSETTAC_FORCAR=1 bash \$0 $CAND"
+  exit 7
+fi
+
 # O PRosettaC decide o que fazer pela EXISTÊNCIA do arquivo: o clean_pdb vê um
 # <struct>_<cadeia>.pdb e pula a limpeza, e um `random_sampling.sdf` de zero
 # byte faz pular a amostragem que o produziria. A primeira versão disto apagava

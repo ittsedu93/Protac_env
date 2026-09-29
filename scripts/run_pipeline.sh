@@ -490,8 +490,18 @@ print(r[i]['candidate_id'] if r else '')")
     # O run_prosettac.sh valida, conserta head e âncora, e lança DESTACADO —
     # então aqui é preciso esperar o resultado, e não o lançamento.
     PIPELINE_OUT="$PIPELINE_OUT" PROSETTAC_DIR="$PROSETTAC_DIR" \
-      bash "$REPO/scripts/run_prosettac.sh" "$CAND" 2>&1 | tee -a "$LOG" \
-      || { log "*** o PRosettaC não subiu; o log acima diz por quê"; exit 1; }
+      bash "$REPO/scripts/run_prosettac.sh" "$CAND" 2>&1 | tee -a "$LOG"
+    # PIPESTATUS e não $?: com o `| tee` o status que chega é o do tee, e um
+    # lançamento que falhou passaria por bem-sucedido.
+    cod_lanc=${PIPESTATUS[0]}
+    if [[ $cod_lanc -eq 7 ]]; then
+      # 7 = já havia execução em andamento. Não é falha: é o motivo de existir
+      # a guarda. Seguir para a espera é o certo — relançar embaralharia as duas.
+      log "  (já estava rodando; sigo para a espera sem relançar)"
+    elif [[ $cod_lanc -ne 0 ]]; then
+      log "*** o PRosettaC não subiu; o log acima diz por quê"
+      exit 1
+    fi
 
     # O limite tem de caber na PIOR execução legítima, não na típica. O custo do
     # Rosetta escala com as transformadas do PatchDock, e a VHL produz duas
