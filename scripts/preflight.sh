@@ -138,7 +138,7 @@ if [[ -s "${PIPELINE_OUT:-}/span_requirement.json" ]]; then
 import json;d=json.load(open('${PIPELINE_OUT}/span_requirement.json'))
 print(f\"vão útil {d['vao_util_A']} Å -> alcance exigido {d['alcance_exigido_A']} Å ({d['ligacoes_minimas']} ligações)\")" 2>/dev/null)"
 else
-  aviso "ainda não medido; a fase 4b mede (precisa de PatchDock e de uma"
+  aviso "ainda não medido; a fase 6a mede (precisa de PatchDock e de uma"
   printf '             preparação do PRosettaC, ~20 min)\n'
 fi
 
