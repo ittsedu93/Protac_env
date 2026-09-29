@@ -493,16 +493,38 @@ print(r[i]['candidate_id'] if r else '')")
       bash "$REPO/scripts/run_prosettac.sh" "$CAND" 2>&1 | tee -a "$LOG" \
       || { log "*** o PRosettaC não subiu; o log acima diz por quê"; exit 1; }
 
-    LIMITE_H="${TERNARIO_LIMITE_H:-24}"
-    log "\n  esperando o Results (limite de ${LIMITE_H} h)..."
+    # O limite tem de caber na PIOR execução legítima, não na típica. O custo do
+    # Rosetta escala com as transformadas do PatchDock, e a VHL produz duas
+    # ordens de grandeza mais que a CRBN: 34 transformadas deram 1184 soluções
+    # em 5 h; 1000 transformadas (o teto do PRosettaC) dão ~35 mil, o que é
+    # dias. Um limite de 24 h declararia falha numa execução que está indo bem —
+    # e desistir de um job de 6 dias na hora 24 é jogar fora 24 h de máquina.
+    LIMITE_H="${TERNARIO_LIMITE_H:-168}"
+    log "\n  esperando o Results (limite de ${LIMITE_H} h)"
+    log "  progresso a cada 30 min; o veredito só sai no fim"
     pronto=0
+    voltas=0
     for _ in $(seq 1 $((LIMITE_H * 12))); do
       sleep 300
+      voltas=$((voltas+1))
       [[ -d "$DIRC/Results" ]] && { pronto=1; break; }
-      # morreu no meio: o log.txt do PRosettaC diz a última etapa alcançada
-      if ! pgrep -u "${USER:-$(id -un)}" -f "PRosettaC.*main\.py" >/dev/null \
-         && [[ -f "$DIRC/log.txt" ]] \
-         && grep -q "run has finished" "$DIRC/log.txt"; then
+
+      # Sinal de vida com número, a cada 30 min. Sem isto, um job de dias é
+      # indistinguível de um job travado — e foi olhando "nada mudou" que este
+      # projeto já matou processos que estavam trabalhando.
+      if (( voltas % 6 == 0 )); then
+        n_pd=$(ls "$DIRC/Patchdock_Results" 2>/dev/null | wc -l)
+        n_dock=$(ls "$DIRC"/Patchdock_Results/*_docking_????.pdb 2>/dev/null | wc -l)
+        n_proc=$(pgrep -u "${USER:-$(id -un)}" -c -f "PRosettaC" 2>/dev/null || echo 0)
+        log "  [$(date +%H:%M)] +$((voltas*5)) min | Patchdock_Results: $n_pd" \
+            "| docking: $n_dock | processos: $n_proc"
+      fi
+
+      # Morreu no meio: só é fim quando o PRosettaC diz que terminou. Processo
+      # ausente com log sem "finished" é queda, e o bloco abaixo trata as duas.
+      if ! pgrep -u "${USER:-$(id -un)}" -f "PRosettaC" >/dev/null \
+         && ! squeue -h -u "${USER:-$(id -un)}" 2>/dev/null | grep -q .; then
+        log "  [$(date +%H:%M)] nenhum processo do PRosettaC vivo — encerrando a espera"
         break
       fi
     done
