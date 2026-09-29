@@ -309,6 +309,8 @@ if quer 6; then
       --e3-structure "$E3_RECEPTOR_PDB" \
       --pcsk9-structure "$DOCKING_DIR/receptor/$(basename "${PCSK9_PDB%.pdb}")_receptor.pdb" \
       --e3-head "$E3_RECRUITER_SDF" \
+      ${E3_CHAIN:+--e3-chain "$E3_CHAIN"} \
+      ${PCSK9_CHAIN:+--pcsk9-chain "$PCSK9_CHAIN"} \
       --prosettac-dir "$PROSETTAC_DIR" \
       --anchor-serial "$WARHEAD_ANCHOR_SERIAL" \
       --outdir "$PIPELINE_OUT/wp3"

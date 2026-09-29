@@ -132,6 +132,43 @@ echo "    conda run -n ${ENV_MDTOOLS:-mdtools} python $AQUI/check_wp1.py \\"
 echo "        --screening ${WP1_SCREENING:-} --prep ${WP1_PREP:-} \\"
 echo "        --e3 ${WP1_E3_LIST:-} ${ANCHORS_SDF:+--anchors-sdf ${ANCHORS_SDF}}"
 
+# O preflight conferia ARQUIVOS e não VALORES de config — e foi por aí que o
+# track da VHL parou na fase 6: o emissor exige a cadeia quando o PDB tem mais
+# de uma, o config declarava PCSK9_CHAIN="B", e o driver não passava o valor
+# adiante. Arquivo presente, config correto, fiação faltando. Conferir a cadeia
+# CONTRA o arquivo pega as três coisas de uma vez.
+secao "cadeias declaradas x cadeias que os arquivos têm"
+confere_cadeia() {   # confere_cadeia <pdb> <valor_do_config> <nome_da_variavel>
+  local pdb="$1" valor="$2" nome="$3"
+  if [[ ! -s "$pdb" ]]; then
+    aviso "$nome: $pdb ainda não existe — a fase que o cria vem antes"
+    return
+  fi
+  local cads
+  cads=$(awk '/^ATOM/{print substr($0,22,1)}' "$pdb" | sort -u | tr -d '\n ')
+  if [[ -z "$valor" ]]; then
+    if [[ ${#cads} -eq 1 ]]; then
+      ok "$nome vazia, e $(basename "$pdb") tem só '$cads' — detectada sem risco"
+    else
+      bloq "$nome está VAZIA e $(basename "$pdb") tem as cadeias '$cads'."
+      printf '             Nada aqui pode escolher por você: preencha %s.\n' "$nome"
+    fi
+  elif [[ "$cads" == *"$valor"* ]]; then
+    ok "$nome='$valor' existe em $(basename "$pdb") (cadeias: '$cads')"
+  else
+    bloq "$nome='$valor' NÃO existe em $(basename "$pdb") — ele tem '$cads'"
+  fi
+}
+
+PCSK9_REC="${DOCKING_DIR:-}/receptor/$(basename "${PCSK9_PDB:-x.pdb}" .pdb)_receptor.pdb"
+confere_cadeia "$PCSK9_REC" "${PCSK9_CHAIN:-}" "PCSK9_CHAIN"
+for E3 in ${WP1_E3_LIST:-}; do
+  D=$(find "${WP1_PREP:-/dev/null}" -maxdepth 1 -type d -name "${E3}*" 2>/dev/null | head -1)
+  [[ -n "$D" ]] || continue
+  R=$(find "$D" -name "*_receptor.pdb" 2>/dev/null | head -1)
+  [[ -n "$R" ]] && confere_cadeia "$R" "${E3_CHAIN:-}" "E3_CHAIN ($E3)"
+done
+
 secao "fase 6a — vão exigido pelo par E3/alvo (o portão novo)"
 if [[ -s "${PIPELINE_OUT:-}/span_requirement.json" ]]; then
   ok "já medido: $(python3 -c "
