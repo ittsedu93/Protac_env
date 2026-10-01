@@ -43,6 +43,38 @@ def transformadas(log: Path) -> int | None:
     return int(achados[-1]) if achados else None
 
 
+ETAPAS = [          # na ordem do main.py do PRosettaC
+    ("Cleaning structures", "preparando receptores (clean + relax)"),
+    ("Sampling the distance", "amostrando a distância entre as âncoras"),
+    ("Running PatchDock", "docking global com a restrição"),
+    ("Run Rosetta local docking", "refinamento local do Rosetta"),
+    ("Generating up to 100 constrained", "conformações do linker"),
+    ("Clustering the top results", "agrupamento final"),
+    ("run has finished", "TERMINADO"),
+]
+
+
+def etapa_atual(log: Path):
+    """A última etapa que o PRosettaC anunciou, e se o docking já acabou.
+
+    Sem isto o script mede só os arquivos de docking local e, quando essa etapa
+    acaba, reporta "92,5%, falta 1h54" para sempre — porque o trabalho mudou de
+    lugar e ele continua olhando o lugar antigo. Percentual de uma etapa que
+    terminou é pior que nenhum percentual.
+    """
+    if not log.exists():
+        return None, False
+    txt = log.read_text(errors="ignore")
+    atual, passou_docking = None, False
+    for chave, nome in ETAPAS:
+        if chave in txt:
+            atual = nome
+            if chave in ("Generating up to 100 constrained",
+                         "Clustering the top results", "run has finished"):
+                passou_docking = True
+    return atual, passou_docking
+
+
 def humano(seg: float) -> str:
     if seg < 0:
         return "?"
@@ -86,6 +118,9 @@ def main():
     n_pd = len(list(pd_dir.iterdir())) if pd_dir.is_dir() else 0
     tr = transformadas(d / "run_prosettac.log")
 
+    etapa, passou = etapa_atual(d / "log.txt")
+    if etapa:
+        print(f"  etapa atual: {etapa}")
     print(f"  Patchdock_Results: {n_pd} arquivos")
     print(f"  transformadas do PatchDock: {tr if tr is not None else '?'}"
           + (f"  (o PRosettaC refina as {TETO_DO_PROSETTAC} melhores)"
@@ -94,6 +129,23 @@ def main():
 
     if n < 2:
         print("\n  poucas soluções para medir taxa — rode de novo em 30 min.")
+        return
+
+    if passou:
+        ultimo = time.strftime("%d/%m %H:%M",
+                               time.localtime(arquivos[-1].stat().st_mtime))
+        parado_h = (time.time() - arquivos[-1].stat().st_mtime) / 3600
+        print()
+        print(f"  O REFINAMENTO LOCAL JÁ TERMINOU (último arquivo: {ultimo}, "
+              f"há {parado_h:.0f} h).")
+        print(f"  O trabalho agora é '{etapa}', que não escreve nesses "
+              f"arquivos —\n  por isso a contagem parou. Não é travamento: "
+              f"confira com")
+        print(f"    tail -3 {d / 'log.txt'}")
+        print(f"    pgrep -u $USER -c -f PRosettaC")
+        print()
+        print(f"  Resta aparecer o diretório Results/. Enquanto houver processo "
+              f"vivo,\n  é só esperar.")
         return
 
     t0, t1 = arquivos[0].stat().st_mtime, arquivos[-1].stat().st_mtime

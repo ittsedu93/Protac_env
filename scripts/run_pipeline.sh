@@ -478,7 +478,18 @@ print(r[i]['candidate_id'] if r else '')")
   [[ -n "$CAND" ]] || { log "*** ranking vazio"; exit 1; }
   log "  candidato: $CAND"
 
-  DIRC=$(find "$PIPELINE_OUT" -maxdepth 5 -type d -name "$CAND" 2>/dev/null | head -1)
+  # Pelo CONFIG, não pelo nome do diretório. `-type d -name "$CAND"` casa tanto
+  # wp3/protacs/<cand> (onde só vive o protac.smi) quanto wp3/prosettac/<cand>,
+  # e o `head -1` pegava o que o find devolvesse primeiro — o errado. O driver
+  # então esperava o Results/ numa pasta onde ele nunca apareceria, e declararia
+  # falha, em 168 h, sobre uma execução que deu certo.
+  #
+  # Esta é a MESMA busca do run_prosettac.sh. Duas implementações de "achar o
+  # diretório do candidato" acabam divergindo, e divergiram.
+  DIRC=$(dirname "$(find "$PIPELINE_OUT" -maxdepth 5 -type f \
+                         -name "prosetta_config.txt" -path "*/$CAND/*" \
+                         2>/dev/null | sort | head -1)" 2>/dev/null)
+  [[ "$DIRC" == "." ]] && DIRC=""
   if [[ -z "$DIRC" ]]; then
     log "*** não achei o diretório do job de $CAND — a fase 6 emite os configs"
     exit 1
@@ -523,11 +534,16 @@ print(r[i]['candidate_id'] if r else '')")
       # indistinguível de um job travado — e foi olhando "nada mudou" que este
       # projeto já matou processos que estavam trabalhando.
       if (( voltas % 6 == 0 )); then
-        n_pd=$(ls "$DIRC/Patchdock_Results" 2>/dev/null | wc -l)
-        n_dock=$(ls "$DIRC"/Patchdock_Results/*_docking_????.pdb 2>/dev/null | wc -l)
+        # `ls dir/*.pdb` com dezenas de milhares de arquivos estoura o limite
+        # de argumentos e devolve zero — que é indistinguível de "não produziu".
+        n_pd=$(find "$DIRC/Patchdock_Results" -maxdepth 1 -type f 2>/dev/null | wc -l)
+        n_dock=$(find "$DIRC/Patchdock_Results" -maxdepth 1 -type f \
+                      -name "*_docking_*.pdb" 2>/dev/null | wc -l)
+        etapa=$(tail -1 "$DIRC/log.txt" 2>/dev/null | cut -c1-58)
         n_proc=$(pgrep -u "${USER:-$(id -un)}" -c -f "PRosettaC" 2>/dev/null || echo 0)
-        log "  [$(date +%H:%M)] +$((voltas*5)) min | Patchdock_Results: $n_pd" \
+        log "  [$(date +%H:%M)] +$((voltas*5)) min | arquivos: $n_pd" \
             "| docking: $n_dock | processos: $n_proc"
+        [[ -n "$etapa" ]] && log "            etapa: $etapa"
       fi
 
       # Morreu no meio: só é fim quando o PRosettaC diz que terminou. Processo
