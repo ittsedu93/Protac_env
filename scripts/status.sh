@@ -2,117 +2,209 @@
 # ---------------------------------------------------------------------------
 # Onde o pipeline está, agora. Só leitura — seguro rodar a qualquer momento.
 #
-#   bash scripts/status.sh
+#   bash scripts/status.sh                                      # track da CRBN
+#   PIPELINE_CONF=config/pipeline_vhl.conf bash scripts/status.sh   # VHL
 #
-# Não existe fila (SLURM) aqui: o pipeline roda como processo solto, lançado
-# com setsid. Quem responde "está rodando?" é o pgrep, não o squeue.
+# A config decide QUAL track ele olha, e isto é o ponto. A versão anterior
+# fixava `config/pipeline.conf` no código e ignorava a variável PIPELINE_CONF
+# que todos os outros scripts respeitam: pedir o status da VHL devolvia o
+# estado da CRBN, com a mesma cara de certo. Um monitor que responde sobre o
+# track errado é pior que nenhum monitor.
+#
+# Há DUAS formas de execução neste projeto, e as duas são olhadas aqui:
+#   - o driver e a MD rodam como processo solto (lançado com setsid) -> pgrep
+#   - o PRosettaC emite milhares de jobs no SLURM                   -> squeue
 # ---------------------------------------------------------------------------
 set -uo pipefail
-CONF="$(dirname "$0")/../config/pipeline.conf"
-[[ -f "$CONF" ]] && source "$CONF"
+
+AQUI="$(cd "$(dirname "$0")" && pwd)"
+CONF="${PIPELINE_CONF:-$AQUI/../config/pipeline.conf}"
+# Caminho relativo passado na variável (o uso natural: PIPELINE_CONF=config/x)
+[[ -f "$CONF" ]] || [[ "$CONF" = /* ]] || CONF="$AQUI/../$CONF"
+if [[ -f "$CONF" ]]; then
+  # shellcheck disable=SC1090
+  source "$CONF"
+else
+  echo "[aviso] config não encontrada: $CONF — usando os valores default"
+fi
 OUT="${PIPELINE_OUT:-$HOME/PRosettaC_runs/vhl_crbn_pcsk9_protac/pipeline}"
-MD="$OUT/md"
-LOG_LAB="$HOME/pipeline.log"
+NS_PROD="${MD_NS_PROD:-200}"
+U="${USER:-$(id -un)}"
 
 echo "=============================================================="
 echo "PIPELINE PROTAC PCSK9 — $(date '+%d/%m %H:%M')"
 echo "=============================================================="
+echo "  config: $(basename "$CONF")"
+echo "  saídas: $OUT"
+echo "  E3:     ${WP1_E3_LIST:-?}"
 
 # --- 1. está rodando? ------------------------------------------------------
-proc=$(pgrep -af "run_pipeline.sh|gmx mdrun|acpype" | grep -v pgrep || true)
+proc=$(pgrep -af "run_pipeline.sh|gmx mdrun|acpype|PRosettaC" | grep -v pgrep || true)
 if [[ -n "$proc" ]]; then
-  echo -e "\nRODANDO:"
-  echo "$proc" | sed 's/^/  /'
+  echo -e "\nPROCESSOS ATIVOS:"
+  echo "$proc" | cut -c1-110 | sed 's/^/  /'
 else
   echo -e "\nNENHUM PROCESSO ATIVO — ou terminou, ou caiu (veja o log adiante)"
 fi
 
+# --- 1b. a fila do SLURM, que é onde o PRosettaC vive ---------------------
+if command -v squeue >/dev/null 2>&1; then
+  rod=$(squeue -h -u "$U" -t RUNNING -o %i 2>/dev/null | wc -l)
+  pen=$(squeue -h -u "$U" -t PENDING -o %i 2>/dev/null | wc -l)
+  if [[ $((rod + pen)) -gt 0 ]]; then
+    echo -e "\nFILA (SLURM):"
+    echo "  rodando: $rod   |   pendentes: $pen"
+    j=$(squeue -h -u "$U" -o %i 2>/dev/null | head -1)
+    cpt=$(scontrol show job "$j" 2>/dev/null \
+            | grep -o "CPUs/Task=[0-9]*" | head -1 | cut -d= -f2)
+    nuc=$(nproc 2>/dev/null || echo "?")
+    if [[ -n "${cpt:-}" && "$nuc" != "?" ]]; then
+      sim=$(( nuc / cpt )); [[ $sim -lt 1 ]] && sim=1
+      echo "  $cpt CPUs por job em $nuc núcleos -> ~$sim simultâneos"
+      # 12 é o que o PRosettaC pede no script de lote, e cada processo usa UM
+      # núcleo: com 12 reservados cabem 2 jobs em 32 núcleos.
+      [[ "$cpt" -ge 12 ]] && \
+        echo "  [ATENÇÃO] 12 CPUs por job é o pedido original e desperdiça a máquina:
+            bash scripts/slurm_cpus_por_job.sh 4 --aplicar"
+    fi
+  fi
+fi
+
 # --- 2. fases concluídas ---------------------------------------------------
+# A lista é a MESMA do run_pipeline.sh, e tem de ser: um status que para na
+# fase 8 diz "acabou" de um pipeline que vai até a 10.
 echo -e "\nFASES:"
-nomes=("" "warheads" "docking PCSK9" "análise" "WP1 recrutador" \
-       "WP2 linkers" "WP3 montagem" "ranking" "MD")
-for n in 1 2 3 4 5 6 7 8; do
+fases=(1 2 3 4 5 6 6a 6b 7 8 9 10)
+declare -A nome=(
+  [1]="warheads PCSK9"            [2]="docking PCSK9"
+  [3]="análise da triagem"        [4]="WP1 recrutador"
+  [5]="WP2 linkers"               [6]="WP3 montagem + jobs"
+  [6a]="vão exigido (PatchDock)"  [6b]="portão de alcance"
+  [7]="ranking dos PROTACs"       [8]="MD nível (ii)"
+  [9]="ternário (PRosettaC)"      [10]="MD nível (iii)"
+)
+for n in "${fases[@]}"; do
   if [[ -f "$OUT/.done_$n" ]]; then
-    printf "  [x] %d %s  (%s)\n" "$n" "${nomes[$n]}" "$(cat "$OUT/.done_$n")"
+    printf "  [x] %-3s %-26s (%s)\n" "$n" "${nome[$n]}" "$(cat "$OUT/.done_$n")"
   else
-    printf "  [ ] %d %s\n" "$n" "${nomes[$n]}"
+    printf "  [ ] %-3s %s\n" "$n" "${nome[$n]}"
   fi
 done
 
-# --- 3. dentro da MD -------------------------------------------------------
-echo -e "\nPREPARO DO SISTEMA:"
-for f in protac.pdb complexo.pdb PTC.acpype/PTC_GMX.itp topol.top complexo.gro \
-         neutro.gro grupos.ndx; do
-  printf "  %s %s\n" "$([[ -s "$MD/$f" ]] && echo '[x]' || echo '[ ]')" "$f"
-done
-
-# O equilíbrio é uma escada: cada degrau existe para alimentar o próximo, e
-# depois do npt.gro nenhum dos anteriores é necessário. Listar arquivo por
-# arquivo responde "o que existe no disco" quando a pergunta é "em que estado
-# o pipeline está" — e um intermediário ausente parece falta quando é sobra.
-echo -e "\nEQUILÍBRIO:"
-if [[ -s "$MD/npt.gro" ]]; then
-  echo "  [x] CONCLUÍDO — npt.gro é a estrutura de partida da produção"
-  faltando=()
-  for f in em.gro em2.gro warm.gro nvt.gro; do
-    [[ -s "$MD/$f" ]] || faltando+=("$f")
-  done
-  if (( ${#faltando[@]} )); then
-    echo "      intermediários ausentes: ${faltando[*]}"
-    echo "      (consumidos pelo degrau seguinte; não fazem falta à produção)"
+# --- 2b. a fase 9, que é onde a VHL está ----------------------------------
+# O diretório do job vem do prosetta_config.txt e não do nome da pasta: o
+# `-name "$CAND"` casa wp3/protacs/<cand> (só o protac.smi) e também
+# wp3/prosettac/<cand>, e pegar o primeiro pegava o errado.
+cfg=$(find "$OUT" -maxdepth 5 -type f -name "prosetta_config.txt" 2>/dev/null \
+        | sort | head -1)
+if [[ -n "$cfg" ]]; then
+  DIRC=$(dirname "$cfg")
+  echo -e "\nTERNÁRIO — PRosettaC ($(basename "$DIRC")):"
+  if [[ -d "$DIRC/Results" ]]; then
+    nclu=$(find "$DIRC/Results" -maxdepth 1 -type d ! -path "$DIRC/Results" \
+             2>/dev/null | wc -l)
+    echo "  [x] Results existe — $nclu cluster(s)"
+    [[ -s "$DIRC/result_summary.txt" ]] && \
+      sed 's/^/      /' "$DIRC/result_summary.txt"
+    [[ -s "$DIRC/concordancia_clusters.csv" ]] \
+      && echo "      concordância medida (concordancia_clusters.csv)" \
+      || echo "      falta o portão de concordância: --from 9"
+  else
+    etapa=$(tail -1 "$DIRC/log.txt" 2>/dev/null | cut -c1-70)
+    [[ -n "$etapa" ]] && echo "  etapa: $etapa"
+    npd=$(find "$DIRC/Patchdock_Results" -maxdepth 1 -type f 2>/dev/null | wc -l)
+    [[ "$npd" -gt 0 ]] && echo "  arquivos em Patchdock_Results: $npd"
+    echo "  Results ainda não existe — a fase 9 está em andamento"
+    echo "  taxa medida:  python scripts/prosettac_progress.py --candidato $(basename "$DIRC")"
   fi
-else
-  for f in em.gro em2.gro warm.gro nvt.gro npt.gro; do
-    printf "  %s %s\n" "$([[ -s "$MD/$f" ]] && echo '[x]' || echo '[ ]')" "$f"
-  done
 fi
 
-# --- 3b. progresso da etapa em andamento -----------------------------------
-# O mdrun escreve "step 3200, remaining wall clock time: 123 s" enquanto roda.
-# É a única estimativa honesta de quanto falta: vem do desempenho medido, não
-# de conta de padeiro.
-for f in "$MD"/mdrun_*.out "$MD"/rep*/mdrun_prod.out; do
-  [[ -f "$f" ]] || continue
-  linha=$(grep -a "remaining wall clock" "$f" | tail -1)
-  if [[ -n "$linha" ]]; then
-    nome=$(basename "$f" .out); nome=${nome#mdrun_}
+# --- 3. as MDs: nível (ii) em md/, nível (iii) em md_ternario/ -------------
+relatorio_md() {
+  local MD="$1" rotulo="$2"
+  [[ -d "$MD" ]] || return 0
+  echo -e "\n$rotulo  ($MD)"
+
+  echo "  PREPARO:"
+  local RESNAME; RESNAME=$(python3 -c "
+import json;print(json.load(open('$MD/md_sistema.json')).get('resname','PTC'))" \
+    2>/dev/null || echo PTC)
+  for f in md_sistema.json protac.sdf "${RESNAME}.acpype/${RESNAME}_GMX.itp" \
+           topol.top complexo.gro neutro.gro grupos.ndx; do
+    printf "    %s %s\n" "$([[ -s "$MD/$f" ]] && echo '[x]' || echo '[ ]')" "$f"
+  done
+
+  # O equilíbrio é uma escada: cada degrau alimenta o próximo, e depois do
+  # npt.gro nenhum dos anteriores é necessário. Listar arquivo por arquivo
+  # responde "o que existe no disco" quando a pergunta é "em que estado o
+  # pipeline está" — e um intermediário ausente parece falta quando é sobra.
+  echo "  EQUILÍBRIO:"
+  if [[ -s "$MD/npt.gro" ]]; then
+    echo "    [x] CONCLUÍDO — npt.gro é a estrutura de partida da produção"
+    local faltando=()
+    for f in em.gro em2.gro warm.gro nvt.gro; do
+      [[ -s "$MD/$f" ]] || faltando+=("$f")
+    done
+    (( ${#faltando[@]} )) && {
+      echo "        intermediários ausentes: ${faltando[*]}"
+      echo "        (consumidos pelo degrau seguinte; não fazem falta)"; }
+  else
+    for f in em.gro em2.gro warm.gro nvt.gro npt.gro; do
+      printf "    %s %s\n" "$([[ -s "$MD/$f" ]] && echo '[x]' || echo '[ ]')" "$f"
+    done
+  fi
+
+  # O mdrun escreve "remaining wall clock time" enquanto roda. É a única
+  # estimativa honesta de quanto falta: vem do desempenho medido.
+  local f linha nomef dir
+  for f in "$MD"/mdrun_*.out "$MD"/rep*/mdrun_prod.out; do
+    [[ -f "$f" ]] || continue
+    linha=$(grep -a "remaining wall clock" "$f" | tail -1)
+    [[ -z "$linha" ]] && continue
+    nomef=$(basename "$f" .out); nomef=${nomef#mdrun_}
     dir=$(basename "$(dirname "$f")")
-    [[ "$dir" == rep* ]] && nome="$dir"
-    echo "  ${nome}: ${linha}"
-  fi
-done
-
-# --- 4. réplicas de produção ----------------------------------------------
-if compgen -G "$MD/rep*" > /dev/null; then
-  echo -e "\nPRODUÇÃO (200 ns por réplica):"
-  for rep in "$MD"/rep*/; do
-    nome=$(basename "$rep")
-    if [[ -s "$rep/prod.gro" ]]; then
-      perf=$(awk '/^Performance:/ {print $2}' "$rep/prod.log" 2>/dev/null | tail -1)
-      if [[ -n "$perf" ]]; then
-        horas=$(awk -v p="$perf" 'BEGIN{printf "%.1f", 200/p*24}')
-        echo "  $nome: CONCLUÍDA — ${perf} ns/dia (${horas} h por réplica)"
-      else
-        echo "  $nome: CONCLUÍDA"
-      fi
-      continue
-    fi
-    if [[ -f "$rep/prod.log" ]]; then
-      # o cabeçalho "Step Time" vem numa linha e os valores na seguinte
-      linha=$(grep -A1 "^ *Step  *Time" "$rep/prod.log" | tail -1)
-      passo=$(echo "$linha" | awk '{print $1}')
-      tempo=$(echo "$linha" | awk '{print $2}')
-      resta=$(awk -v t="${tempo:-0}" 'BEGIN{printf "%.1f", 200 - t/1000}')
-      pct=$(awk -v t="${tempo:-0}" 'BEGIN{printf "%.1f", t/2000}')
-      echo "  $nome: ${pct}% — passo ${passo:-?}, ${tempo:-?} ps (faltam ~${resta} ns)"
-      # desempenho, se o mdrun já tiver escrito
-      perf=$(grep -E "^Performance:" "$rep/prod.log" | tail -1)
-      [[ -n "$perf" ]] && echo "      $perf"
-    else
-      echo "  $nome: iniciando"
-    fi
+    [[ "$dir" == rep* ]] && nomef="$dir"
+    echo "    ${nomef}: ${linha}"
   done
-fi
+
+  if compgen -G "$MD/rep*" > /dev/null; then
+    echo "  PRODUÇÃO (${NS_PROD} ns por réplica):"
+    local rep n perf horas passo tempo resta pct
+    for rep in "$MD"/rep*/; do
+      n=$(basename "$rep")
+      if [[ -s "$rep/prod.gro" ]]; then
+        perf=$(awk '/^Performance:/ {print $2}' "$rep/prod.log" 2>/dev/null | tail -1)
+        if [[ -n "$perf" ]]; then
+          horas=$(awk -v p="$perf" -v ns="$NS_PROD" 'BEGIN{printf "%.1f", ns/p*24}')
+          echo "    $n: CONCLUÍDA — ${perf} ns/dia (${horas} h)"
+        else
+          echo "    $n: CONCLUÍDA"
+        fi
+        continue
+      fi
+      if [[ -f "$rep/prod.log" ]]; then
+        linha=$(grep -A1 "^ *Step  *Time" "$rep/prod.log" | tail -1)
+        passo=$(echo "$linha" | awk '{print $1}')
+        tempo=$(echo "$linha" | awk '{print $2}')
+        resta=$(awk -v t="${tempo:-0}" -v ns="$NS_PROD" 'BEGIN{printf "%.1f", ns - t/1000}')
+        pct=$(awk -v t="${tempo:-0}" -v ns="$NS_PROD" 'BEGIN{printf "%.1f", t/(ns*10)}')
+        echo "    $n: ${pct}% — passo ${passo:-?}, ${tempo:-?} ps (faltam ~${resta} ns)"
+        perf=$(grep -E "^Performance:" "$rep/prod.log" | tail -1)
+        [[ -n "$perf" ]] && echo "        $perf"
+      else
+        echo "    $n: iniciando"
+      fi
+    done
+  fi
+
+  for v in md_veredito.json ternario_metricas.csv; do
+    [[ -s "$MD/$v" ]] && { echo "  VEREDITO ($v):";
+                           head -12 "$MD/$v" | sed 's/^/    /'; }
+  done
+}
+
+relatorio_md "$OUT/md"           "MD NÍVEL (ii) — E3 + recrutador-linker-warhead"
+relatorio_md "$OUT/md_ternario"  "MD NÍVEL (iii) — ternário completo com PCSK9"
 
 # --- 5. GPU ----------------------------------------------------------------
 if command -v nvidia-smi > /dev/null; then
@@ -121,14 +213,15 @@ if command -v nvidia-smi > /dev/null; then
       --format=csv,noheader | sed 's/^/  /'
 fi
 
-# --- 6. veredito ou últimas linhas do log ---------------------------------
-if [[ -s "$MD/md_veredito.json" ]]; then
-  echo -e "\nVEREDITO DA MD:"
-  sed 's/^/  /' "$MD/md_veredito.json"
-elif [[ -f "$LOG_LAB" ]]; then
-  echo -e "\nÚLTIMAS LINHAS DO LOG:"
-  grep -vE "^\s*$" "$LOG_LAB" | tail -6 | sed 's/^/  /'
-  falha=$(grep -n "^\*\*\*" "$LOG_LAB" | tail -1)
-  [[ -n "$falha" ]] && echo -e "\n  ÚLTIMA FALHA REGISTRADA: $falha"
+# --- 6. o log do driver ----------------------------------------------------
+# O log mais recente DESTE track, não um caminho fixo no $HOME: com dois
+# tracks o `~/pipeline.log` é de um deles, e não se sabe de qual.
+LOG=$(ls -t "$OUT"/pipeline_*.log 2>/dev/null | head -1)
+[[ -z "$LOG" ]] && LOG=$(ls -t "$HOME"/pipeline*.log 2>/dev/null | head -1)
+if [[ -n "${LOG:-}" && -f "$LOG" ]]; then
+  echo -e "\nÚLTIMAS LINHAS DE $(basename "$LOG"):"
+  grep -vE "^\s*$" "$LOG" | tail -6 | cut -c1-100 | sed 's/^/  /'
+  falha=$(grep -n "^\*\*\*" "$LOG" | tail -1)
+  [[ -n "$falha" ]] && echo -e "\n  ÚLTIMA FALHA REGISTRADA: $(echo "$falha" | cut -c1-100)"
 fi
 echo
