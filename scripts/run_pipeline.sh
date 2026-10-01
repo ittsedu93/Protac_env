@@ -66,6 +66,35 @@ run_in() {
   fi
 }
 
+# O candidato do ranking e o diretório do job dele. As fases 9 e 10 precisam
+# dos MESMOS dois valores, e este projeto já pagou por ter duas buscas do mesmo
+# diretório: elas divergiram, o driver vigiou a pasta errada, e declararia
+# falha em 168 h sobre uma execução que deu certo. Uma função, um lugar.
+#
+# A busca é pelo prosetta_config.txt e não pelo nome do diretório, porque
+# `-type d -name "$CAND"` casa tanto wp3/protacs/<cand> (onde só vive o
+# protac.smi) quanto wp3/prosettac/<cand> — e o `head -1` pegava o primeiro.
+achar_candidato() {  # define CAND e DIRC, ou sai != 0
+  local rank="${1:-1}"
+  local rankcsv="$PIPELINE_OUT/protac_ranking.csv"
+  [[ -s "$rankcsv" ]] || { log "*** $rankcsv não existe: rode a fase 7"; return 1; }
+  CAND=$(python3 -c "
+import csv
+r=list(csv.DictReader(open('$rankcsv')))
+i=min(max(int('$rank')-1,0),len(r)-1) if r else 0
+print(r[i]['candidate_id'] if r else '')")
+  [[ -n "$CAND" ]] || { log "*** ranking vazio"; return 1; }
+  DIRC=$(dirname "$(find "$PIPELINE_OUT" -maxdepth 5 -type f \
+                         -name "prosetta_config.txt" -path "*/$CAND/*" \
+                         2>/dev/null | sort | head -1)" 2>/dev/null)
+  [[ "$DIRC" == "." ]] && DIRC=""
+  if [[ -z "$DIRC" ]]; then
+    log "*** não achei o diretório do job de $CAND — a fase 6 emite os configs"
+    return 1
+  fi
+  return 0
+}
+
 exige() {  # exige <variável> <mensagem>
   local nome="$1"; local val="${!1:-}"
   if [[ -z "$val" ]]; then
@@ -89,7 +118,7 @@ exige() {  # exige <variável> <mensagem>
 # usa é a preparação do PRosettaC, e ela precisa de um candidato. Não dá para
 # medir antes de existir um PROTAC — mas dá, e é o que importa, para medir antes
 # de gastar MD.
-FASES=(1 2 3 4 5 6 6a 6b 7 8 9)
+FASES=(1 2 3 4 5 6 6a 6b 7 8 9 10)
 
 indice_da_fase() {
   local alvo="$1" i=0
@@ -468,32 +497,9 @@ fi
 if quer 9; then
   head_ 9 "Complexo ternário — PRosettaC + concordância (horas)"
 
-  RANK="$PIPELINE_OUT/protac_ranking.csv"
-  [[ -s "$RANK" ]] || { log "*** $RANK não existe: rode a fase 7"; exit 1; }
-  CAND=$(python3 -c "
-import csv
-r=list(csv.DictReader(open('$RANK')))
-i=min(max(int('${MD_RANK:-1}')-1,0),len(r)-1) if r else 0
-print(r[i]['candidate_id'] if r else '')")
-  [[ -n "$CAND" ]] || { log "*** ranking vazio"; exit 1; }
+  achar_candidato "${MD_RANK:-1}" || exit 1
   log "  candidato: $CAND"
-
-  # Pelo CONFIG, não pelo nome do diretório. `-type d -name "$CAND"` casa tanto
-  # wp3/protacs/<cand> (onde só vive o protac.smi) quanto wp3/prosettac/<cand>,
-  # e o `head -1` pegava o que o find devolvesse primeiro — o errado. O driver
-  # então esperava o Results/ numa pasta onde ele nunca apareceria, e declararia
-  # falha, em 168 h, sobre uma execução que deu certo.
-  #
-  # Esta é a MESMA busca do run_prosettac.sh. Duas implementações de "achar o
-  # diretório do candidato" acabam divergindo, e divergiram.
-  DIRC=$(dirname "$(find "$PIPELINE_OUT" -maxdepth 5 -type f \
-                         -name "prosetta_config.txt" -path "*/$CAND/*" \
-                         2>/dev/null | sort | head -1)" 2>/dev/null)
-  [[ "$DIRC" == "." ]] && DIRC=""
-  if [[ -z "$DIRC" ]]; then
-    log "*** não achei o diretório do job de $CAND — a fase 6 emite os configs"
-    exit 1
-  fi
+  log "  job em:    $DIRC"
 
   if [[ -d "$DIRC/Results" ]]; then
     log "  já há Results — pulando direto para a concordância"
@@ -611,6 +617,110 @@ else
 fi
 
 # ===========================================================================
+# FASE 10 — MD do nível (iii): o complexo ternário completo (DIAS)
+# ===========================================================================
+# É a pergunta final do WP3, e ela só existe quando a fase 9 aprovou: a
+# interface ternária que o PRosettaC modelou sobrevive ao solvente, ou ela
+# existia só porque o docking a construiu?
+#
+# Esta fase NÃO roda sozinha por default (MD_TERNARIO_AUTO=0). A workstation é
+# compartilhada, a produção são 3 x 200 ns, e o md_run.sh toma a GPU com
+# `-update gpu` por dias seguidos. Tomar a placa de outras pessoas sem aviso
+# não é uma decisão do driver — é uma combinação entre quem usa a máquina.
+# Para ligar: MD_TERNARIO_AUTO=1 na config, ou rode os três passos à mão.
+if quer 10; then
+  if [[ "${MD_TERNARIO_AUTO:-0}" != "1" ]]; then
+    log ""
+    head_ 10 "MD nível (iii) — ternário completo (NÃO automática)"
+    log "  A fase 9 aprovou a pose. O nível (iii) está pronto para rodar, e"
+    log "  pede a GPU por dias — então ele espera a sua decisão."
+    log ""
+    log "  Os três comandos, em ordem (cada um destacável):"
+    if achar_candidato "${MD_RANK:-1}"; then
+      log "    MDT=$PIPELINE_OUT/md_ternario"
+      log ""
+      log "    # 1) preparar (segundos) — separa proteínas e ligante, confere"
+      log "    #    o SMILES contra as coordenadas e imprime o custo do sistema"
+      log "    conda run -n $ENV_MDTOOLS python $REPO/scripts/md_prepare_ternario.py \\"
+      log "        --candidato $CAND --prosettac-dir $(dirname "$DIRC") \\"
+      log "        --outdir \$MDT --ram-limite-gb ${MD_RAM_LIMITE_GB:-8}"
+      log ""
+      log "    # 2) rodar (dias; GPU dedicada) — destacado, sobrevive ao SSH"
+      log "    setsid bash $REPO/scripts/md_run.sh \$MDT ${MD_N_REPLICAS:-3} \\"
+      log "        > ~/md_ternario.log 2>&1 & disown -a"
+      log ""
+      log "    # 3) analisar (minutos) — PBC primeiro, senão o RMSD mede a caixa"
+      log "    bash $REPO/scripts/md_fix_pbc.sh \$MDT"
+      log "    conda run -n $ENV_MDTOOLS python $REPO/scripts/md_analyze_ternario.py \\"
+      log "        --md-dir \$MDT"
+    fi
+    log ""
+    log "  Para o driver fazer isso sozinho: MD_TERNARIO_AUTO=1 em $CONF"
+  else
+    head_ 10 "MD nível (iii) — ternário completo (dias, GPU dedicada)"
+    achar_candidato "${MD_RANK:-1}" || exit 1
+    log "  candidato: $CAND"
+    [[ -d "$DIRC/Results" ]] || {
+      log "*** $DIRC/Results não existe: a fase 9 não terminou"; exit 1; }
+
+    MDT="$PIPELINE_OUT/md_ternario"
+
+    # 10a. preparar. Daqui sai o md_sistema.json com as cinco chaves que o
+    #      md_run.sh lê pelo nome, e o portão de custo do sistema solvatado.
+    run_in "$ENV_MDTOOLS" python "$REPO/scripts/md_prepare_ternario.py" \
+        --candidato "$CAND" --prosettac-dir "$(dirname "$DIRC")" \
+        --outdir "$MDT" --ram-limite-gb "${MD_RAM_LIMITE_GB:-8}"
+
+    # 10b. rodar. Mesmo script do nível (ii): a metodologia do WP3 é a mesma
+    #      (ff14SB + GAFF2/AM1-BCC, TIP3P, caixa de 1,3 nm, corte 0,9 nm com
+    #      PME, EM -> 5 ns NPT -> 3 x 200 ns a 310 K/1 atm, quadro a cada
+    #      200 ps). O que muda é o conteúdo da caixa, não os parâmetros.
+    log "\n[\$ md_run.sh $MDT ${MD_N_REPLICAS:-3}]"
+    if [[ $DRY -eq 0 ]]; then
+      NS_PROD="${MD_NS_PROD:-200}" NS_NPT="${MD_NS_NPT:-5}" \
+        MD_TRUNCAR_PERTO="${MD_TRUNCAR_PERTO:-}" \
+        bash "$REPO/scripts/md_run.sh" "$MDT" "${MD_N_REPLICAS:-3}" \
+        2>&1 | tee -a "$LOG" || {
+          log "*** a MD do ternário falhou; veja $LOG"; exit 1; }
+
+      # PBC antes da análise, sempre. Os cortes nas lacunas do cristal fizeram
+      # da proteína várias moléculas, e o GROMACS envolve cada uma por conta —
+      # segmentos da mesma cadeia aparecem em lados opostos da caixa e o RMSD
+      # passa a medir a aresta. Com DUAS proteínas o artefato é pior: E3 e alvo
+      # podem ser envolvidos separadamente, e a interface "desaparece".
+      bash "$REPO/scripts/md_fix_pbc.sh" "$MDT" 2>&1 | tee -a "$LOG" \
+        || log "  [ATENÇÃO] a correção de PBC falhou; a análise vai avisar"
+    fi
+
+    # 10c. analisar. Sai 6 quando REPROVA, e reprovar não é falha do pipeline:
+    #      é a resposta de que esta pose não sobrevive ao solvente.
+    log "\n[\$ md_analyze_ternario.py --md-dir $MDT]  (env $ENV_MDTOOLS)"
+    if [[ $DRY -eq 0 ]]; then
+      conda run --no-capture-output -n "$ENV_MDTOOLS" python -u \
+          "$REPO/scripts/md_analyze_ternario.py" --md-dir "$MDT" \
+          2>&1 | tee -a "$LOG"
+      cod=${PIPESTATUS[0]}
+      if [[ $cod -eq 6 ]]; then
+        log ""
+        log "*** O complexo ternário REPROVOU nos critérios do nível (iii)."
+        log "*** Isto é resultado, não falha: a interface modelada não se"
+        log "*** sustentou em solvente, e essa é uma conclusão sobre o"
+        log "*** candidato — para a tese, com os números no CSV."
+        log "*** Próximo candidato: MD_RANK=$(( ${MD_RANK:-1} + 1 )) em $CONF,"
+        log "*** depois --from 9."
+        exit 8
+      elif [[ $cod -ne 0 ]]; then
+        log "*** a análise do ternário falhou (código $cod); veja $LOG"
+        exit 1
+      fi
+    fi
+    mark_done 10
+  fi
+else
+  log "\n[fase 10 pulada]"
+fi
+
+# ===========================================================================
 log "\n$(printf '=%.0s' {1..70})"
 log "PIPELINE CONCLUÍDO  $(date -Is)"
 log "$(printf '=%.0s' {1..70})"
@@ -619,6 +729,8 @@ log "\nO que exige julgamento humano e NÃO foi automatizado:"
 log "  - submeter os JSONs do AlphaFold 3 em alphafoldserver.com (o Boltz-2"
 log "    local cobre a via ortogonal; o AF3 é confirmação independente)"
 log "  - inspecionar no ChimeraX a pose ternária aprovada, antes da MD (iii)"
+log "  - COMBINAR o horário da MD (iii) com quem mais usa a workstation: são"
+log "    3 x 200 ns com a GPU dedicada, e por isso a fase 10 não roda sozinha"
 log "  - decidir trocar de E3 ou de sítio quando a fase 9 reprovar: o número"
 log "    está medido, a decisão de projeto é sua"
 log "$LOG"

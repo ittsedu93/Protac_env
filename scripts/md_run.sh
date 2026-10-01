@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
 # ---------------------------------------------------------------------------
-# Fase 8b — MD do nível (ii): E3 ligase + recrutador-linker-warhead.
+# MD dos níveis (ii) e (iii) — o mesmo script, porque a metodologia do WP3 é a
+# mesma nos dois: ff14SB + GAFF2/AM1-BCC, TIP3P, caixa cúbica de 1,3 nm, corte
+# de 0,9 nm com PME, EM -> aquecimento -> NVT -> 5 ns de NPT -> 3 x 200 ns a
+# 310 K e 1 atm, quadro a cada 200 ps. O que muda é o CONTEÚDO da caixa:
+#
+#   fase 8  nível (ii)   E3 + recrutador-linker-warhead      (md_prepare.py)
+#   fase 10 nível (iii)  E3 + PROTAC + PCSK9, o ternário  (md_prepare_ternario)
 #
 #   bash scripts/md_run.sh <dir_md> [n_replicas]
 #
-# Lê md_sistema.json (escrito por md_prepare.py), parametriza o PROTAC com
+# Lê md_sistema.json (escrito por um dos dois md_prepare), parametriza o PROTAC com
 # GAFF2/AM1-BCC via acpype, monta o sistema em AMBER ff14SB + TIP3P, e roda
 # minimização, NVT, NPT e produção no GROMACS.
 #
@@ -37,6 +43,13 @@ gmx_ok() {
 }
 CAND=$(jq_ candidate_id); CARGA=$(jq_ carga_formal)
 RESNAME=$(jq_ resname); LIG_PDB=$(jq_ lig_pdb); RECEPTOR=$(jq_ receptor_pdb)
+# O nível vem do JSON e serve só ao cabeçalho — mas um cabeçalho que diz
+# "nível (ii)" numa corrida do ternário é um log que engana quem o lê depois.
+NIVEL=$(python3 -c "import json;print(json.load(open('$INFO')).get('nivel','ii'))")
+case "$NIVEL" in
+  iii) ROTULO="nível (iii) — E3 + PROTAC + PCSK9 (ternário completo)";;
+  *)   ROTULO="nível (ii) — E3 + recrutador-linker-warhead";;
+esac
 
 # parâmetros da metodologia
 TEMP=310; PRESSAO=1.0; DT=0.002
@@ -54,7 +67,7 @@ BOX_NM=1.3; RC=0.9
 SAVE_PS=200
 
 echo "=============================================================="
-echo "MD nível (ii) — E3 + recrutador-linker-warhead"
+echo "MD $ROTULO"
 echo "  candidato : $CAND"
 echo "  carga     : $CARGA"
 echo "  produção  : ${NS_PROD} ns x ${N_REP} réplicas"

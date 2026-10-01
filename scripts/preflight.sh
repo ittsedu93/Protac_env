@@ -201,6 +201,65 @@ else
   printf '             Concluir ausência de geometria com isso é concluir errado.\n'
 fi
 
+secao "fase 10 — MD do ternário (nível iii)"
+# Estas conferências existem porque cada uma delas falha TARDE. O acpype é
+# chamado depois de o PRosettaC ter rodado dias; o MDAnalysis só no fim da
+# produção; o disco enche no meio da terceira réplica. Um `import` que custa
+# um segundo agora vale horas depois.
+tem_exe "${ACPYPE_EXE:-$HOME/miniconda3/envs/mdtools/bin/acpype}" \
+        "acpype (GAFF2/AM1-BCC do PROTAC)"
+
+if conda run -n "${ENV_MDTOOLS:-mdtools}" python -c \
+     "import MDAnalysis; from MDAnalysis.lib.distances import capped_distance" \
+     >/dev/null 2>&1; then
+  ok "MDAnalysis com capped_distance (contagem de contatos por células)"
+else
+  bloq "MDAnalysis ausente ou sem capped_distance no env '${ENV_MDTOOLS:-mdtools}'"
+  printf '             A análise do nível (iii) conta contatos por lista de\n'
+  printf '             células; sem isso são 17 milhões de distâncias por quadro.\n'
+fi
+
+# md_analyze_ternario.py IMPORTA do md_analyze.py (carregar, descobrir_resname).
+# Um erro de import ali só apareceria depois de dias de produção.
+if conda run -n "${ENV_MDTOOLS:-mdtools}" python -c \
+     "import sys; sys.path.insert(0, '$AQUI'); import md_analyze_ternario" \
+     >/dev/null 2>&1; then
+  ok "md_analyze_ternario importa (inclusive o md_analyze de onde ele reusa)"
+else
+  bloq "md_analyze_ternario.py não importa no env '${ENV_MDTOOLS:-mdtools}'"
+  printf '             Rode para ver o motivo:\n'
+  printf '               conda run -n %s python %s/md_analyze_ternario.py --help\n' \
+         "${ENV_MDTOOLS:-mdtools}" "$AQUI"
+fi
+
+# Espaço em disco. Três réplicas de 200 ns de um sistema de ~120 mil átomos,
+# com quadro a cada 200 ps, dão ~1 GB de .xtc cada; somados aos .trr, .edr,
+# checkpoints e ao sistema solvatado, a ordem é 15 GB. Encher o disco na
+# terceira réplica perde as três, porque o mdrun morre sem fechar o .xtc.
+if [[ -n "${PIPELINE_OUT:-}" ]]; then
+  livre_gb=$(df -BG --output=avail "$(dirname "${PIPELINE_OUT}")" 2>/dev/null \
+               | tail -1 | tr -dc '0-9')
+  if [[ -z "${livre_gb:-}" ]]; then
+    aviso "não consegui medir o espaço livre em $(dirname "$PIPELINE_OUT")"
+  elif [[ "$livre_gb" -lt 15 ]]; then
+    bloq "só ${livre_gb} GB livres; a MD (iii) pede ~15 GB"
+    printf '             O mdrun morre sem fechar o .xtc, então encher o disco\n'
+    printf '             na terceira réplica perde as três.\n'
+  else
+    ok "espaço livre: ${livre_gb} GB (a MD (iii) pede ~15 GB)"
+  fi
+fi
+
+if [[ "${MD_TERNARIO_AUTO:-0}" == "1" ]]; then
+  aviso "MD_TERNARIO_AUTO=1 — a fase 10 vai TOMAR A GPU por dias"
+  printf '             São 3 x %s ns com `-update gpu`. A workstation é\n' \
+         "${MD_NS_PROD:-200}"
+  printf '             compartilhada: isto precisa estar combinado com quem\n'
+  printf '             mais a usa, e não é o preflight que combina.\n'
+else
+  ok "MD_TERNARIO_AUTO=0 — a fase 10 imprime os comandos e espera você"
+fi
+
 echo
 echo "=============================================================="
 if [[ $bloqueios -gt 0 ]]; then
