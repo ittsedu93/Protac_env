@@ -69,7 +69,7 @@ uma_passada() {
   local j atual
   j=$(squeue -h -u "$U" -t PENDING -o %i | head -1)
   atual=$(scontrol show job "$j" 2>/dev/null \
-            | grep -o "NumCPUs=[0-9]*" | head -1 | cut -d= -f2)
+            | grep -o "CPUs/Task=[0-9]*" | head -1 | cut -d= -f2)
   echo "  [$(date +%H:%M)] rodando: $rodando | pendentes: $pendentes"
   echo "              pedido atual: ${atual:-?} CPUs por job -> pedido novo: $CPUS"
 
@@ -83,7 +83,13 @@ uma_passada() {
   fi
 
   # Um job primeiro: se o SLURM recusar a alteração, não adianta tentar 2553.
-  if ! scontrol update job "$j" NumCPUs="$CPUS" MinCPUsNode="$CPUS" 2>/dev/null; then
+  # CpusPerTask é o campo que DECIDE. A alocação de um job de uma tarefa é
+  # ntasks x cpus-per-task; mexer só em NumCPUs muda o número que o squeue
+  # mostra e não muda o que o escalonador reserva — foi o que aconteceu aqui:
+  #     NumCPUs=2   CPUs/Task=12   Reason=Resources
+  # com 8 núcleos ociosos e nenhum job entrando.
+  if ! scontrol update job "$j" CpusPerTask="$CPUS" NumCPUs="$CPUS" \
+         MinCPUsNode="$CPUS" 2>/dev/null; then
     echo "              [FALHOU] o SLURM recusou a alteração em $j."
     echo "              Alguns clusters proíbem reduzir CPU de job pendente;"
     echo "              nesse caso o caminho é o administrador, ou relançar com"
@@ -91,7 +97,7 @@ uma_passada() {
     return 1
   fi
   local conferido
-  conferido=$(scontrol show job "$j" | grep -o "NumCPUs=[0-9]*" | head -1 | cut -d= -f2)
+  conferido=$(scontrol show job "$j" | grep -o "CPUs/Task=[0-9]*" | head -1 | cut -d= -f2)
   if [[ "$conferido" != "$CPUS" ]]; then
     echo "              [NÃO PEGOU] $j continua com $conferido CPUs — parei aqui"
     return 1
@@ -99,9 +105,12 @@ uma_passada() {
 
   echo "              funcionou em $j; aplicando nos demais..."
   squeue -h -u "$U" -t PENDING -o %i \
-    | xargs -P 4 -I{} scontrol update job {} NumCPUs="$CPUS" MinCPUsNode="$CPUS" \
-      2>/dev/null
-  ajustados=$(squeue -h -u "$U" -t PENDING -o "%i %C" | awk -v c="$CPUS" '$2==c' | wc -l)
+    | xargs -P 4 -I{} scontrol update job {} CpusPerTask="$CPUS" \
+        NumCPUs="$CPUS" MinCPUsNode="$CPUS" 2>/dev/null
+  ajustados=$(squeue -h -u "$U" -t PENDING -o %i \
+                | xargs -r -P 4 -I{} sh -c 'scontrol show job {} 2>/dev/null \
+                    | grep -o "CPUs/Task=[0-9]*"' \
+                | grep -c "CPUs/Task=$CPUS")
   echo "              $ajustados de $pendentes pendentes agora com $CPUS CPUs"
   local nucleos antes depois
   nucleos=$(nproc)
