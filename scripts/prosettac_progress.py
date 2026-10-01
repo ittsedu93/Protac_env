@@ -27,7 +27,10 @@ docking por transformada (1184 soluções de 34 transformadas). O alvo é
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import re
+import subprocess
 import time
 from pathlib import Path
 
@@ -73,6 +76,79 @@ def etapa_atual(log: Path):
                          "Clustering the top results", "run has finished"):
                 passou_docking = True
     return atual, passou_docking
+
+
+def progresso_pela_fila(d: Path):
+    """Progresso da etapa atual pela FILA, não pelos arquivos.
+
+    Cada etapa do PRosettaC escreve arquivos diferentes, e um contador amarrado
+    a um padrão de nome mede uma etapa e cega nas outras. O que vale para todas
+    é o número de jobs: o log anuncia quantos foram emitidos, e o `squeue` diz
+    quantos ainda não acabaram.
+
+    A taxa precisa de duas medidas. Em vez de pedir ao operador que rode duas
+    vezes e faça a conta, guardamos a leitura anterior ao lado do log.
+    """
+    emitidos = 0
+    txt = (d / "log.txt").read_text(errors="ignore") if (d / "log.txt").exists() else ""
+    listas = re.findall(r"jobs: \[(.*?)\]", txt)
+    if listas:
+        emitidos = len([x for x in listas[-1].split(",") if x.strip()])
+    try:
+        saida = subprocess.run(["squeue", "-h", "-u", os.environ.get("USER", "")],
+                               capture_output=True, text=True, timeout=20)
+        restantes = len([l for l in saida.stdout.splitlines() if l.strip()])
+        tem_fila = saida.returncode == 0
+    except Exception:
+        restantes, tem_fila = 0, False
+
+    if not tem_fila:
+        print("\n  (sem `squeue` nesta máquina — acompanhe por "
+              "`pgrep -u $USER -c -f PRosettaC`)")
+        return
+    if not emitidos:
+        print(f"\n  jobs ainda na fila: {restantes}")
+        return
+
+    feitos = max(emitidos - restantes, 0)
+    print()
+    print(f"  jobs desta etapa: {emitidos} emitidos, {restantes} na fila, "
+          f"{feitos} concluídos")
+    print(f"  progresso da etapa: {100 * feitos / emitidos:.1f}%")
+
+    # taxa a partir da leitura anterior
+    estado = d / ".progresso.json"
+    agora = time.time()
+    anterior = None
+    if estado.exists():
+        try:
+            anterior = json.loads(estado.read_text())
+        except Exception:
+            anterior = None
+    try:
+        estado.write_text(json.dumps({"t": agora, "restantes": restantes,
+                                      "emitidos": emitidos}))
+    except Exception:
+        pass
+
+    if anterior and anterior.get("emitidos") == emitidos:
+        dt = agora - anterior["t"]
+        df = anterior["restantes"] - restantes
+        if dt > 300 and df > 0:
+            taxa = df / dt
+            print(f"  desde a leitura anterior ({humano(dt)}): {df} jobs "
+                  f"-> {taxa * 3600:.0f} jobs/h")
+            print(f"  falta: ~{humano(restantes / taxa)}  (fim por volta de "
+                  f"{time.strftime('%d/%m %H:%M', time.localtime(agora + restantes / taxa))})")
+        elif dt > 300:
+            print(f"  desde a leitura anterior ({humano(dt)}): nenhum job "
+                  f"concluiu — se isso se repetir, há travamento")
+    else:
+        print("  rode de novo em ~30 min: com duas leituras sai a taxa e o fim")
+
+    print()
+    print("  Enquanto a fila baixa, é só esperar. O fim da etapa é o "
+          "diretório\n  Results/ aparecer.")
 
 
 def humano(seg: float) -> str:
@@ -136,16 +212,10 @@ def main():
                                time.localtime(arquivos[-1].stat().st_mtime))
         parado_h = (time.time() - arquivos[-1].stat().st_mtime) / 3600
         print()
-        print(f"  O REFINAMENTO LOCAL JÁ TERMINOU (último arquivo: {ultimo}, "
+        print(f"  O refinamento local terminou (último arquivo: {ultimo}, "
               f"há {parado_h:.0f} h).")
-        print(f"  O trabalho agora é '{etapa}', que não escreve nesses "
-              f"arquivos —\n  por isso a contagem parou. Não é travamento: "
-              f"confira com")
-        print(f"    tail -3 {d / 'log.txt'}")
-        print(f"    pgrep -u $USER -c -f PRosettaC")
-        print()
-        print(f"  Resta aparecer o diretório Results/. Enquanto houver processo "
-              f"vivo,\n  é só esperar.")
+        print(f"  A etapa atual é '{etapa}', que não escreve nesses arquivos.")
+        progresso_pela_fila(d)
         return
 
     t0, t1 = arquivos[0].stat().st_mtime, arquivos[-1].stat().st_mtime
