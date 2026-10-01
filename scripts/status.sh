@@ -30,6 +30,8 @@ fi
 OUT="${PIPELINE_OUT:-$HOME/PRosettaC_runs/vhl_crbn_pcsk9_protac/pipeline}"
 NS_PROD="${MD_NS_PROD:-200}"
 U="${USER:-$(id -un)}"
+# shellcheck disable=SC1091
+source "$AQUI/proc_prosettac.sh"
 
 echo "=============================================================="
 echo "PIPELINE PROTAC PCSK9 — $(date '+%d/%m %H:%M')"
@@ -72,7 +74,11 @@ if command -v squeue >/dev/null 2>&1; then
       # CPUs, a máquina fica com mais trabalho do que núcleos — e numa máquina
       # COMPARTILHADA essa diferença sai do bolso de outras pessoas, sem
       # acelerar a nossa fila (o sistema só reparte os mesmos núcleos).
-      nproc_pr=$(pgrep -u "$U" -c -f "PRosettaC" 2>/dev/null || echo 0)
+      # Não `pgrep -c -f PRosettaC`: esse padrão conta o PRÓPRIO status.sh,
+      # porque o caminho do track contém "PRosettaC_runs". Era por isso que ele
+      # dizia 19 onde havia 18 — e um número que alimenta recomendação de CPU
+      # não pode ter o medidor dentro da medida.
+      nproc_pr=$(prosettac_n_trabalhadores)
       carga=$(awk '{printf "%.0f", $1}' /proc/loadavg 2>/dev/null)
       if [[ "$rod" -gt 0 && "$nproc_pr" -gt 0 ]]; then
         por_job=$(awk -v p="$nproc_pr" -v j="$rod" 'BEGIN{printf "%.1f", p/j}')

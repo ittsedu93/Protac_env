@@ -54,61 +54,15 @@ BATIDAS="${TERNARIO_BATIDAS:-6}"              # 1 relatório a cada 6 voltas
 JANELA_MIN=$(( 2 * BATIDAS * ESPERA_S / 60 )); (( JANELA_MIN < 1 )) && JANELA_MIN=1
 U="${USER:-$(id -un)}"
 
-# O PADRÃO IMPORTA, e descobri isso no teste: `pgrep -f "PRosettaC"` casa o
-# PRÓPRIO processo deste script, porque o diretório do job que ele recebe como
-# argumento é .../PRosettaC_runs/.../prosettac/SC0013__WH023 — a string está
-# na linha de comando. A consequência não é teórica: a execução nunca pareceria
-# ter terminado, o script esperaria as 12 h do travamento, e o diagnóstico
-# diria TRAVAMENTO onde a verdade é "terminou sem Results" — conclusões
-# diferentes, uma sobre a máquina e outra sobre o candidato.
-#
-# `PRosettaC/main\.py` é o orquestrador, vive enquanto a execução viver, e a
-# barra depois do nome não casa com `PRosettaC_runs`. O $$ e o $PPID ficam
-# excluídos de qualquer forma, porque isto é barato e definitivo.
-PADRAO_ORQ='PRosettaC/main\.py'
-PADRAO_TRAB='PRosettaC/(main|constraint_generation|distance_constraints)\.py'
-
-# Nem o padrão nem excluir $$/$PPID bastam: no teste quem casou foi o shell
-# AVÔ, cuja linha de comando continha a string. Excluir parentesco é uma lista
-# que nunca fecha. O que fecha é olhar o CONTEÚDO: um orquestrador de verdade é
-# um interpretador python cujo primeiro argumento é o main.py de dentro da
-# instalação do PRosettaC. Um shell que menciona o caminho não é isso.
-eh_orquestrador() {  # eh_orquestrador <pid>
-  local pid="$1" c0 c1
-  [[ -r "/proc/$pid/cmdline" ]] || return 1
-  mapfile -d '' -t argv < "/proc/$pid/cmdline" 2>/dev/null || return 1
-  c0="${argv[0]:-}"; c1="${argv[1]:-}"
-  [[ "$c0" == *python* ]] || return 1
-  [[ "$c1" == */PRosettaC/main.py || "$c1" == */PRosettaC//main.py ]] || return 1
-  return 0
-}
-
-orquestrador_vivo() {
-  local pid
-  for pid in $(pgrep -u "$U" -f "$PADRAO_ORQ" 2>/dev/null); do
-    [[ "$pid" == "$$" ]] && continue
-    eh_orquestrador "$pid" && return 0
-  done
-  return 1
-}
-
-# Os trabalhadores são python rodando um .py de dentro da instalação. Mesma
-# verificação de conteúdo: argv[0] é python, argv[1] é um .py sob PRosettaC/.
-n_trabalhadores() {
-  local n=0 pid c0 c1
-  for pid in $(pgrep -u "$U" -f "$PADRAO_TRAB" 2>/dev/null); do
-    [[ "$pid" == "$$" ]] && continue
-    [[ -r "/proc/$pid/cmdline" ]] || continue
-    mapfile -d '' -t argv < "/proc/$pid/cmdline" 2>/dev/null || continue
-    c0="${argv[0]:-}"; c1="${argv[1]:-}"
-    [[ "$c0" == *python* ]] || continue
-    [[ "$c1" == *PRosettaC/*.py || "$c1" == *PRosettaC//*.py ]] || continue
-    n=$((n + 1))
-  done
-  echo "$n"
-}
-
-fila_tem_algo() { squeue -h -u "$U" 2>/dev/null | grep -q .; }
+# Quem conta processos é o proc_prosettac.sh, num arquivo só, porque o
+# status.sh precisa da mesma resposta — e as duas cópias anteriores estavam
+# erradas de maneiras diferentes ao mesmo tempo. O cabeçalho dele explica as
+# duas armadilhas (barra dupla no caminho, e o padrão casando quem o menciona).
+# shellcheck disable=SC1091
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/proc_prosettac.sh"
+orquestrador_vivo() { prosettac_orquestrador_vivo; }
+n_trabalhadores()   { prosettac_n_trabalhadores; }
+fila_tem_algo()     { prosettac_fila_tem_algo; }
 
 echo "  esperando o Results em $DIRC"
 echo "  desiste por FALTA DE PROGRESSO ($SEM_PROG_H h sem mudança), não por"
