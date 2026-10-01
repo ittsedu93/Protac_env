@@ -66,6 +66,29 @@ if command -v squeue >/dev/null 2>&1; then
       [[ "$cpt" -ge 12 ]] && \
         echo "  [ATENÇÃO] 12 CPUs por job é o pedido original e desperdiça a máquina:
             bash scripts/slurm_cpus_por_job.sh 4 --aplicar"
+
+      # Quantos PROCESSOS cada job de fato cria. O pedido de CPU do SLURM é uma
+      # promessa; isto é a medida. Se o job cria mais processos do que pediu
+      # CPUs, a máquina fica com mais trabalho do que núcleos — e numa máquina
+      # COMPARTILHADA essa diferença sai do bolso de outras pessoas, sem
+      # acelerar a nossa fila (o sistema só reparte os mesmos núcleos).
+      nproc_pr=$(pgrep -u "$U" -c -f "PRosettaC" 2>/dev/null || echo 0)
+      carga=$(awk '{printf "%.0f", $1}' /proc/loadavg 2>/dev/null)
+      if [[ "$rod" -gt 0 && "$nproc_pr" -gt 0 ]]; then
+        por_job=$(awk -v p="$nproc_pr" -v j="$rod" 'BEGIN{printf "%.1f", p/j}')
+        echo "  processos do PRosettaC: $nproc_pr  (~$por_job por job)"
+        echo "  carga do sistema: ${carga:-?}  em $nuc núcleos"
+        if [[ -n "${carga:-}" ]] && [[ "$carga" -gt $((nuc + nuc / 4)) ]]; then
+          justo=$(awk -v n="$nuc" -v pj="$por_job" 'BEGIN{v=int(n/pj); print (v<1?1:v)}')
+          cpu_justo=$(awk -v n="$nuc" -v j="$justo" 'BEGIN{v=int(n/j); print (v<1?1:v)}')
+          echo "  [ATENÇÃO] carga ${carga} em ${nuc} núcleos: a máquina está"
+          echo "            sobrecarregada ~$(awk -v c="$carga" -v n="$nuc" 'BEGIN{printf "%.1fx", c/n}')."
+          echo "            Cada job cria ~${por_job} processos, não ${cpt}. Para caber"
+          echo "            nos núcleos (~${justo} jobs simultâneos), sem perder"
+          echo "            vazão nossa e devolvendo a máquina a quem mais a usa:"
+          echo "              bash scripts/slurm_cpus_por_job.sh ${cpu_justo} --aplicar --vigiar 20"
+        fi
+      fi
     fi
   fi
 fi
@@ -95,11 +118,55 @@ done
 # O diretório do job vem do prosetta_config.txt e não do nome da pasta: o
 # `-name "$CAND"` casa wp3/protacs/<cand> (só o protac.smi) e também
 # wp3/prosettac/<cand>, e pegar o primeiro pegava o errado.
-cfg=$(find "$OUT" -maxdepth 5 -type f -name "prosetta_config.txt" 2>/dev/null \
-        | sort | head -1)
-if [[ -n "$cfg" ]]; then
-  DIRC=$(dirname "$cfg")
+# QUAL candidato, e isto importa mais do que parece. A primeira versão disto
+# pegava o primeiro prosetta_config.txt em ordem alfabética, e a fase 6 emite um
+# config para CADA candidato montado: com SC0006__WH014 e SC0013__WH023 no
+# disco, o status anunciava o SC0006 enquanto o que rodava era o SC0013 — e o
+# comando de taxa que ele imprimia media o candidato errado. Dois nomes com a
+# mesma cara de certo.
+#
+# A fonte mais verdadeira é o processo VIVO: o cwd do main.py do PRosettaC é o
+# diretório do job que está rodando, agora. Sem processo vivo, cai no ranking
+# (a mesma fonte que o driver usa) e, por último, no log.txt mais recente.
+DIRC=""; FONTE=""
+# `pgrep -f` casa QUALQUER processo cuja linha de comando contenha o padrão —
+# inclusive o shell que roda este script, um `tail` num caminho com esse nome,
+# ou um editor com o arquivo aberto. No teste ele devolveu 4 PIDs e o `head -1`
+# pegou o do próprio shell, cujo cwd não é diretório de job nenhum.
+# Então não se escolhe por POSIÇÃO: percorre-se os candidatos e aceita-se o
+# primeiro cujo cwd realmente contenha um prosetta_config.txt. É verificação
+# de conteúdo, não de nome.
+for pid_ps in $(pgrep -u "$U" -f "PRosettaC/main\.py" 2>/dev/null); do
+  [[ -r "/proc/$pid_ps/cwd" ]] || continue
+  cand_dir=$(readlink -f "/proc/$pid_ps/cwd" 2>/dev/null) || continue
+  if [[ -n "${cand_dir:-}" && -f "$cand_dir/prosetta_config.txt" ]]; then
+    DIRC="$cand_dir"; FONTE="processo vivo (pid $pid_ps)"; break
+  fi
+done
+if [[ -z "$DIRC" && -s "$OUT/protac_ranking.csv" ]]; then
+  cand=$(python3 -c "
+import csv
+r=list(csv.DictReader(open('$OUT/protac_ranking.csv')))
+i=min(max(int('${MD_RANK:-1}')-1,0),len(r)-1) if r else 0
+print(r[i]['candidate_id'] if r else '')" 2>/dev/null)
+  if [[ -n "${cand:-}" ]]; then
+    DIRC=$(dirname "$(find "$OUT" -maxdepth 5 -type f -name "prosetta_config.txt" \
+             -path "*/$cand/*" 2>/dev/null | sort | head -1)" 2>/dev/null)
+    [[ "$DIRC" == "." ]] && DIRC=""
+    [[ -n "$DIRC" ]] && FONTE="ranking, rank ${MD_RANK:-1}"
+  fi
+fi
+if [[ -z "$DIRC" ]]; then
+  ultimo=$(find "$OUT" -maxdepth 5 -type f -name "log.txt" -path "*/prosettac/*" \
+             -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
+  [[ -n "${ultimo:-}" ]] && { DIRC=$(dirname "$ultimo"); FONTE="log.txt mais recente"; }
+fi
+if [[ -n "$DIRC" ]]; then
+  n_cfg=$(find "$OUT" -maxdepth 5 -type f -name "prosetta_config.txt" 2>/dev/null | wc -l)
   echo -e "\nTERNÁRIO — PRosettaC ($(basename "$DIRC")):"
+  echo "  candidato identificado por: $FONTE"
+  [[ "$n_cfg" -gt 1 ]] && \
+    echo "  (há $n_cfg candidatos com job emitido; este é o que está em curso)"
   if [[ -d "$DIRC/Results" ]]; then
     nclu=$(find "$DIRC/Results" -maxdepth 1 -type d ! -path "$DIRC/Results" \
              2>/dev/null | wc -l)
