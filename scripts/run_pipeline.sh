@@ -21,6 +21,14 @@
 #   bash ~/Protac_env/scripts/run_pipeline.sh 2>&1 | tee ~/pipeline.log
 #   (Ctrl+B, depois D)  /  tmux attach -t protac para voltar
 #
+# RELANCE O DRIVER DEPOIS DE UM `git pull` QUE MEXA NESTE ARQUIVO.
+# O bash lê o script do disco conforme executa, guardando a posição em bytes.
+# Editar o arquivo embaixo de um processo em andamento faz ele retomar na
+# posição antiga de um conteúdo novo — e o que ele executa a partir dali é
+# lixo. Um laço já parseado (como a espera da fase 9) termina inteiro, então
+# há tempo: `pkill -f run_pipeline.sh` e relançar é seguro, porque a guarda de
+# execução em andamento do run_prosettac.sh impede relançamento duplicado.
+#
 # Cada fase grava um marcador em $PIPELINE_OUT/.done_<n>. Fases já concluídas
 # são puladas, então relançar depois de uma queda custa só a fase interrompida.
 # Os scripts pesados são retomáveis por conta própria, então mesmo uma fase
@@ -520,46 +528,59 @@ if quer 9; then
       exit 1
     fi
 
-    # O limite tem de caber na PIOR execução legítima, não na típica. O custo do
-    # Rosetta escala com as transformadas do PatchDock, e a VHL produz duas
-    # ordens de grandeza mais que a CRBN: 34 transformadas deram 1184 soluções
-    # em 5 h; 1000 transformadas (o teto do PRosettaC) dão ~35 mil, o que é
-    # dias. Um limite de 24 h declararia falha numa execução que está indo bem —
-    # e desistir de um job de 6 dias na hora 24 é jogar fora 24 h de máquina.
-    LIMITE_H="${TERNARIO_LIMITE_H:-168}"
-    log "\n  esperando o Results (limite de ${LIMITE_H} h)"
-    log "  progresso a cada 30 min; o veredito só sai no fim"
-    pronto=0
-    voltas=0
-    for _ in $(seq 1 $((LIMITE_H * 12))); do
-      sleep 300
-      voltas=$((voltas+1))
-      [[ -d "$DIRC/Results" ]] && { pronto=1; break; }
-
-      # Sinal de vida com número, a cada 30 min. Sem isto, um job de dias é
-      # indistinguível de um job travado — e foi olhando "nada mudou" que este
-      # projeto já matou processos que estavam trabalhando.
-      if (( voltas % 6 == 0 )); then
-        # `ls dir/*.pdb` com dezenas de milhares de arquivos estoura o limite
-        # de argumentos e devolve zero — que é indistinguível de "não produziu".
-        n_pd=$(find "$DIRC/Patchdock_Results" -maxdepth 1 -type f 2>/dev/null | wc -l)
-        n_dock=$(find "$DIRC/Patchdock_Results" -maxdepth 1 -type f \
-                      -name "*_docking_*.pdb" 2>/dev/null | wc -l)
-        etapa=$(tail -1 "$DIRC/log.txt" 2>/dev/null | cut -c1-58)
-        n_proc=$(pgrep -u "${USER:-$(id -un)}" -c -f "PRosettaC" 2>/dev/null || echo 0)
-        log "  [$(date +%H:%M)] +$((voltas*5)) min | arquivos: $n_pd" \
-            "| docking: $n_dock | processos: $n_proc"
-        [[ -n "$etapa" ]] && log "            etapa: $etapa"
-      fi
-
-      # Morreu no meio: só é fim quando o PRosettaC diz que terminou. Processo
-      # ausente com log sem "finished" é queda, e o bloco abaixo trata as duas.
-      if ! pgrep -u "${USER:-$(id -un)}" -f "PRosettaC" >/dev/null \
-         && ! squeue -h -u "${USER:-$(id -un)}" 2>/dev/null | grep -q .; then
-        log "  [$(date +%H:%M)] nenhum processo do PRosettaC vivo — encerrando a espera"
-        break
-      fi
-    done
+    # A ESPERA vive em scripts/esperar_results.sh, e vive lá por um motivo:
+    # ela já errou duas vezes, e das duas o erro só apareceria depois de horas
+    # ou dias — um contador amarrado ao nome de arquivo de UMA etapa, e um
+    # limite de RELÓGIO que declararia falha em 08/10 de uma execução medida
+    # para terminar em 10/10. Um laço que só se exercita em 12 h não é um laço
+    # testado. Como script próprio, os cinco desfechos dele se verificam em
+    # segundos com TERNARIO_ESPERA_S=1.
+    #
+    #   0 = Results apareceu
+    #   1 = terminou SEM Results  -> conclusão sobre o CANDIDATO
+    #   2 = travamento            -> conclusão sobre a MÁQUINA
+    # Os valores vão EXPLÍCITOS na linha. `source` da config define variáveis
+    # de shell, não de ambiente: sem isto o esperar_results.sh não vê nada do
+    # que a config declara e cai nos defaults DELE — a config diria 12 h e o
+    # script usaria 12 h por coincidência, e no dia em que os dois divergissem
+    # ninguém saberia qual valeu. Foi o teste que pegou isto, e é a mesma falha
+    # de fiação que já custou duas corridas a este projeto: arquivo presente,
+    # config correta, ninguém passando o valor.
+    TERNARIO_SEM_PROGRESSO_H="${TERNARIO_SEM_PROGRESSO_H:-12}" \
+    TERNARIO_LIMITE_H="${TERNARIO_LIMITE_H:-336}" \
+    TERNARIO_ESPERA_S="${TERNARIO_ESPERA_S:-300}" \
+    TERNARIO_BATIDAS="${TERNARIO_BATIDAS:-6}" \
+      bash "$REPO/scripts/esperar_results.sh" "$DIRC" 2>&1 | tee -a "$LOG"
+    cod_espera=${PIPESTATUS[0]}
+    pronto=0; travado=0
+    case "$cod_espera" in
+      0) pronto=1;;
+      2) travado=1;;
+    esac
+    if [[ $travado -eq 1 ]]; then
+      # Travado NÃO é "sem geometria". Dizer a segunda coisa quando aconteceu a
+      # primeira manda o projeto refazer a fase 5 por causa de uma fila presa.
+      log "\n  TRAVAMENTO, não ausência de resultado. Últimas linhas do log.txt:"
+      tail -8 "$DIRC/log.txt" 2>/dev/null | sed 's/^/      /' | tee -a "$LOG"
+      log ""
+      log "*** A execução parou de avançar: fila, arquivos e log.txt sem mudar"
+      log "*** por ${TERNARIO_SEM_PROGRESSO_H:-12} h. Isto NÃO é 'não existe"
+      log "*** geometria ternária' —"
+      log "*** é a execução presa, e a conclusão sobre o candidato continua"
+      log "*** em aberto."
+      log "***"
+      log "*** O que olhar, nesta ordem:"
+      log "***   squeue -u ${USER:-$(id -un)} | head   jobs presos em PENDING?"
+      log "***   sinfo -o '%P %a %l %D %t %N'      a partição está drenada?"
+      log "***   df -h $(dirname "$PIPELINE_OUT")  o disco encheu?"
+      log "***   tail -40 $DIRC/log.txt"
+      log "***"
+      log "***   bash $REPO/scripts/esperar_results.sh $DIRC   (só reatacha)"
+      log "***"
+      log "*** Resolvido o motivo, retome com --from 9: a guarda de execução"
+      log "*** em andamento impede relançamento duplicado."
+      exit 9
+    fi
     if [[ $pronto -eq 0 ]]; then
       log "\n  o PRosettaC terminou sem Results. Últimas linhas do log.txt:"
       tail -6 "$DIRC/log.txt" 2>/dev/null | sed 's/^/      /' | tee -a "$LOG"
