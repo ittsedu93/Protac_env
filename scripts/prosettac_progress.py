@@ -78,6 +78,49 @@ def etapa_atual(log: Path):
     return atual, passou_docking
 
 
+def serie_do_log_do_driver(pipeline_out: Path):
+    """[(minutos, fila)] lidos dos heartbeats do driver, em ordem.
+
+    O `+N min` é monotônico desde o início da espera, então não há ambiguidade
+    de data nem de virada de meia-noite — o problema clássico de reconstruir
+    tempo a partir de `[HH:MM]`.
+    """
+    logs = sorted(pipeline_out.glob("pipeline_*.log"),
+                  key=lambda f: f.stat().st_mtime, reverse=True)
+    for log in logs[:3]:
+        pontos = []
+        for m in re.finditer(r"\+(\d+) min \| fila: (\d+)",
+                             log.read_text(errors="ignore")):
+            pontos.append((int(m.group(1)), int(m.group(2))))
+        if len(pontos) >= 2:
+            return pontos, log
+    return [], None
+
+
+def taxa_da_serie(pontos):
+    """(taxa_longa, taxa_recente) em jobs/h, ou (None, None).
+
+    Duas janelas de propósito. A longa é a que projeta o fim; a recente mostra
+    se a execução desacelerou — e é a diferença entre as duas que informa.
+    Uma média de 5 dias esconde uma parada de 12 h; a janela curta sozinha
+    confunde flutuação com tendência.
+    """
+    if len(pontos) < 2:
+        return None, None
+    t0, f0 = pontos[0]
+    t1, f1 = pontos[-1]
+    longa = (f0 - f1) / ((t1 - t0) / 60) if t1 > t0 and f0 > f1 else None
+    # janela recente: os pontos dos últimos 180 min
+    recentes = [p for p in pontos if p[0] >= t1 - 180]
+    curta = None
+    if len(recentes) >= 2:
+        ta, fa = recentes[0]
+        tb, fb = recentes[-1]
+        if tb > ta and fa >= fb:
+            curta = (fa - fb) / ((tb - ta) / 60)
+    return longa, curta
+
+
 def progresso_pela_fila(d: Path):
     """Progresso da etapa atual pela FILA, não pelos arquivos.
 
@@ -86,8 +129,27 @@ def progresso_pela_fila(d: Path):
     é o número de jobs: o log anuncia quantos foram emitidos, e o `squeue` diz
     quantos ainda não acabaram.
 
-    A taxa precisa de duas medidas. Em vez de pedir ao operador que rode duas
-    vezes e faça a conta, guardamos a leitura anterior ao lado do log.
+    A taxa precisa de duas medidas no tempo, e a melhor fonte delas NÃO é este
+    script: é o log do driver. O esperar_results.sh já grava, a cada 30 min,
+
+        [09:15] +2790 min | fila: 1785 | arquivos: 115487 | processos: 1
+
+    ou seja, uma série temporal da fila com um contador de minutos monotônico —
+    que não depende de data, de fuso, nem de quando o operador rodou isto pela
+    última vez. Dezenas de pontos, de graça.
+
+    O arquivo de estado ao lado do log continua como reserva, para quando o
+    driver não estiver registrando. Mas ele tinha dois defeitos, e o primeiro
+    explica uma pergunta sem resposta:
+
+      silêncio   o `if dt > 300 and df > 0 / elif dt > 300` não tinha `else`.
+                 Com a leitura anterior feita menos de 5 min antes, o script
+                 não dizia NADA sobre a taxa — nem o número, nem por que não
+                 havia número. Quem pergunta "está ok?" fica sem resposta e sem
+                 saber que perguntou errado
+      amnésia    o estado era sobrescrito em TODA execução. Rodar duas vezes
+                 seguidas apagava a leitura antiga e destruía a base de
+                 comparação justamente de quem estava conferindo com atenção
     """
     emitidos = 0
     txt = (d / "log.txt").read_text(errors="ignore") if (d / "log.txt").exists() else ""
@@ -116,35 +178,98 @@ def progresso_pela_fila(d: Path):
           f"{feitos} concluídos")
     print(f"  progresso da etapa: {100 * feitos / emitidos:.1f}%")
 
-    # taxa a partir da leitura anterior
+    # --- a taxa: primeiro do log do driver, que tem dezenas de pontos -----
+    taxa_h = None
+    medido = False          # o log do driver respondeu (mesmo que "parada")
+    pontos, log_drv = serie_do_log_do_driver(d.parent.parent.parent)
+    if pontos:
+        longa, curta = taxa_da_serie(pontos)
+        span_h = (pontos[-1][0] - pontos[0][0]) / 60
+        print(f"  medido no log do driver ({log_drv.name}, {len(pontos)} "
+              f"leituras em {humano(span_h * 3600)}):")
+        if longa:
+            print(f"      média: {longa:.0f} jobs/h")
+            taxa_h = longa
+            medido = True
+        if curta is not None:
+            nota = ""
+            if longa and longa > 0 and curta > 0:
+                if curta < 0.6 * longa:
+                    nota = "  <- desacelerou"
+                elif curta > 1.4 * longa:
+                    nota = "  <- acelerou"
+            print(f"      últimas 3 h: {curta:.0f} jobs/h{nota}")
+            # A projeção usa a MENOR das duas. Projetar pela média quando a
+            # execução desacelerou promete uma data que não vai acontecer, e
+            # uma data otimista é pior que nenhuma: é com ela que se decide
+            # desligar o computador e voltar na quinta.
+            if taxa_h and curta > 0:
+                taxa_h = min(taxa_h, curta)
+            elif curta == 0:
+                # Com a fila PARADA não existe projeção. A versão anterior caía
+                # na média e anunciava "falta ~4d 18h" logo abaixo de "0 jobs/h
+                # nas últimas 3 h" — duas linhas que se contradizem, e a data é
+                # a que o operador leva embora.
+                taxa_h = None
+                medido = True      # medimos: a medida é "parada"
+                print("      nenhum job concluído nas últimas 3 h: NÃO há data"
+                      " a projetar.")
+                print("      Se repetir na próxima leitura, é travamento —"
+                      " confira a fila e o disco:")
+                print("          squeue -u $USER | head")
+                print("          df -h $(dirname $PWD)")
+
+    # --- reserva: o arquivo de estado, para quando não há log do driver ---
     estado = d / ".progresso.json"
     agora = time.time()
-    anterior = None
+    hist = []
     if estado.exists():
         try:
-            anterior = json.loads(estado.read_text())
+            dados = json.loads(estado.read_text())
+            if dados.get("emitidos") == emitidos:
+                hist = [tuple(x) for x in dados.get("leituras", [])]
         except Exception:
-            anterior = None
+            hist = []
+    # Guarda HISTÓRICO, não só a última: sobrescrever a cada execução apagava a
+    # base de comparação de quem rodava duas vezes seguidas para conferir.
+    hist.append((agora, restantes))
+    hist = hist[-60:]
     try:
-        estado.write_text(json.dumps({"t": agora, "restantes": restantes,
-                                      "emitidos": emitidos}))
+        estado.write_text(json.dumps({"emitidos": emitidos, "leituras": hist}))
     except Exception:
         pass
 
-    if anterior and anterior.get("emitidos") == emitidos:
-        dt = agora - anterior["t"]
-        df = anterior["restantes"] - restantes
-        if dt > 300 and df > 0:
-            taxa = df / dt
-            print(f"  desde a leitura anterior ({humano(dt)}): {df} jobs "
-                  f"-> {taxa * 3600:.0f} jobs/h")
-            print(f"  falta: ~{humano(restantes / taxa)}  (fim por volta de "
-                  f"{time.strftime('%d/%m %H:%M', time.localtime(agora + restantes / taxa))})")
-        elif dt > 300:
-            print(f"  desde a leitura anterior ({humano(dt)}): nenhum job "
-                  f"concluiu — se isso se repetir, há travamento")
-    else:
-        print("  rode de novo em ~30 min: com duas leituras sai a taxa e o fim")
+    # A reserva só entra se o log do driver NÃO respondeu. "Fila parada" é uma
+    # resposta, não ausência de fonte: sem esta distinção o script dizia "não há
+    # data a projetar" e logo abaixo "confira se o driver está vivo" — duas
+    # linhas que se contradizem, sobre um driver que acabou de ser lido.
+    if taxa_h is None and not medido:
+        # a leitura mais antiga que dê uma janela de pelo menos 10 min
+        base = next((h for h in hist if agora - h[0] >= 600), None)
+        if base:
+            dt = agora - base[0]
+            df = base[1] - restantes
+            if df > 0:
+                taxa_h = df / dt * 3600
+                print(f"  medido entre duas leituras deste script "
+                      f"({humano(dt)}): {df} jobs -> {taxa_h:.0f} jobs/h")
+            else:
+                print(f"  em {humano(dt)} de leituras deste script nenhum job "
+                      f"concluiu — se repetir, é travamento")
+        else:
+            # O else que faltava. Sem ele, uma leitura anterior recente fazia o
+            # script não dizer NADA sobre a taxa — nem o número, nem por que
+            # não havia número.
+            quando = humano(agora - hist[0][0]) if len(hist) > 1 else "agora"
+            print(f"  ainda sem taxa: a leitura mais antiga é de {quando}, e a"
+                  f" janela\n  mínima é 10 min. O driver também registra a fila"
+                  f" a cada 30 min —\n  se este número não aparecer, confira se"
+                  f" o driver está vivo:\n      pgrep -af esperar_results.sh")
+
+    if taxa_h and taxa_h > 0:
+        falta_s = restantes / taxa_h * 3600
+        print(f"  falta: ~{humano(falta_s)}  (fim por volta de "
+              f"{time.strftime('%d/%m %H:%M', time.localtime(agora + falta_s))})")
 
     print()
     print("  Enquanto a fila baixa, é só esperar. O fim da etapa é o "
@@ -203,19 +328,30 @@ def main():
              if tr and tr > TETO_DO_PROSETTAC else ""))
     print(f"  soluções de docking local escritas: {n}")
 
-    if n < 2:
-        print("\n  poucas soluções para medir taxa — rode de novo em 30 min.")
-        return
-
+    # A guarda de "poucas soluções" ficava AQUI, antes do desvio para a fila —
+    # e bloqueava a única medida que funciona nesta etapa. As soluções de
+    # docking local são a matéria-prima de UMA etapa; a fila vale para todas.
+    # Com o Patchdock_Results limpo ou renomeado, o script dizia "poucas
+    # soluções para medir taxa" de uma execução com 2682 jobs medíveis na fila.
+    # Guarda de uma etapa não pode barrar a medida de outra.
     if passou:
-        ultimo = time.strftime("%d/%m %H:%M",
-                               time.localtime(arquivos[-1].stat().st_mtime))
-        parado_h = (time.time() - arquivos[-1].stat().st_mtime) / 3600
         print()
-        print(f"  O refinamento local terminou (último arquivo: {ultimo}, "
-              f"há {parado_h:.0f} h).")
+        if arquivos:
+            ultimo = time.strftime("%d/%m %H:%M",
+                                   time.localtime(arquivos[-1].stat().st_mtime))
+            parado_h = (time.time() - arquivos[-1].stat().st_mtime) / 3600
+            print(f"  O refinamento local terminou (último arquivo: {ultimo}, "
+                  f"há {parado_h:.0f} h).")
+        else:
+            print("  O refinamento local já passou, e não há arquivos "
+                  "*_docking_*.pdb aqui.")
         print(f"  A etapa atual é '{etapa}', que não escreve nesses arquivos.")
         progresso_pela_fila(d)
+        return
+
+    if n < 2:
+        print("\n  poucas soluções de docking para medir taxa — rode de novo"
+              " em 30 min.")
         return
 
     t0, t1 = arquivos[0].stat().st_mtime, arquivos[-1].stat().st_mtime
