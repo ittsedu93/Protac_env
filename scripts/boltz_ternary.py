@@ -118,6 +118,11 @@ def main():
                          "a PCSK9 madura é de duas cadeias e o docking manteve "
                          "as duas (PCSK9_KEEP_CHAINS)")
     ap.add_argument("--smiles", default=None)
+    ap.add_argument("--job-dir", type=Path, default=None,
+                    help="diretório do job do PRosettaC deste candidato. O "
+                         "prosetta_config.txt dele diz as estruturas, as "
+                         "cadeias e o SMILES — é a fonte autoritativa, e é "
+                         "independente de track.")
     ap.add_argument("--out", type=Path, default=None)
     args = ap.parse_args()
 
@@ -125,22 +130,83 @@ def main():
     out = (args.out or work / "boltz_ternario" / args.candidato).expanduser()
     out.mkdir(parents=True, exist_ok=True)
 
-    # --- receptores -------------------------------------------------------
-    e3 = args.e3_pdb or achar(
-        work / "prep" / "CRBN_4TZ4" / "4TZ4_receptor.pdb",
-        work / "pipeline" / "md" / "receptor_fixed.pdb")
-    pcsk9 = args.pcsk9_pdb or achar(
-        Path.home() / "PCSK9_docking" / "receptor" / "6U26_receptor.pdb",
-        Path.home() / "PCSK9_docking" / "receptor.pdb",
-        Path.home() / "structures" / "6U26.pdb")
-    if e3 is None or pcsk9 is None:
+    # --- receptores, do CONFIG DO JOB -------------------------------------
+    # A primeira versão disto tinha os caminhos da CRBN escritos no código
+    # (`prep/CRBN_4TZ4/4TZ4_receptor.pdb`, `pipeline/md/receptor_fixed.pdb`) e
+    # o SMILES vinha de `pipeline/`, que é a saída DAQUELE track. Num projeto
+    # que abandonou a CRBN, isso não é só inútil: é um script que só sabe
+    # trabalhar no track errado.
+    #
+    # A fonte autoritativa é o prosetta_config.txt do job: ele nomeia as
+    # estruturas, as cadeias e o arquivo do PROTAC, foi o que o PRosettaC de
+    # fato usou, e não sabe nem precisa saber de qual track veio.
+    cfg_cadeias = {}
+    if args.job_dir:
+        jd = args.job_dir.expanduser()
+        cfg = jd / "prosetta_config.txt"
+        if not cfg.exists():
+            raise SystemExit(f"não achei {cfg}")
+        campos = {}
+        for linha in cfg.read_text().splitlines():
+            if ": " in linha:
+                k, v = linha.split(": ", 1)
+                campos[k.strip()] = v.split()
+        estruturas = campos.get("Structures", [])
+        cadeias = campos.get("Chains", [])
+        heads = campos.get("Heads", [])
+        if not (len(estruturas) == len(cadeias) == len(heads) == 2):
+            raise SystemExit(
+                f"o config não tem 2 estruturas/cadeias/heads:\n"
+                f"  Structures: {estruturas}\n  Chains: {cadeias}\n"
+                f"  Heads: {heads}")
+
+        # QUAL LADO É A E3, decidido pelo CONTEÚDO e não pela posição. A
+        # convenção do PRosettaC é que a estrutura i casa com o head i, e o
+        # head da E3 é o recrutador. Procurar "recruiter" no nome é mais
+        # verificável que confiar na ordem — e se não der para decidir, o
+        # script para em vez de inverter E3 e alvo silenciosamente, o que
+        # trocaria o significado de toda a comparação adiante.
+        idx_e3 = [i for i, h in enumerate(heads) if "recruit" in h.lower()]
+        if len(idx_e3) != 1:
+            raise SystemExit(
+                f"não consegui decidir qual head é o recrutador da E3: {heads}."
+                f"\nPasse --e3-pdb/--e3-chain e --pcsk9-pdb/--pcsk9-chain.")
+        i_e3 = idx_e3[0]
+        i_pc = 1 - i_e3
+        e3 = args.e3_pdb or (jd / estruturas[i_e3])
+        pcsk9 = args.pcsk9_pdb or (jd / estruturas[i_pc])
+        cfg_cadeias = {"e3": cadeias[i_e3], "pcsk9": cadeias[i_pc]}
+        print(f"do config do job: E3 = {estruturas[i_e3]} cadeia "
+              f"{cadeias[i_e3]} (head {heads[i_e3]})")
+        print(f"                  alvo = {estruturas[i_pc]} cadeia "
+              f"{cadeias[i_pc]} (head {heads[i_pc]})")
+    else:
+        # Caminho antigo, do track da CRBN. Mantido só para reproduzir um
+        # número daquele track; para a VHL, use --job-dir.
+        e3 = args.e3_pdb or achar(
+            work / "prep" / "CRBN_4TZ4" / "4TZ4_receptor.pdb",
+            work / "pipeline" / "md" / "receptor_fixed.pdb")
+        pcsk9 = args.pcsk9_pdb or achar(
+            Path.home() / "PCSK9_docking" / "receptor" / "6U26_receptor.pdb",
+            Path.home() / "PCSK9_docking" / "receptor.pdb",
+            Path.home() / "structures" / "6U26.pdb")
+    if e3 is None or pcsk9 is None or not Path(e3).exists() \
+            or not Path(pcsk9).exists():
         raise SystemExit(
             "não achei os PDB dos receptores.\n"
             f"  E3   : {e3}\n  PCSK9: {pcsk9}\n"
-            "Passe --e3-pdb e --pcsk9-pdb explicitamente.")
+            "Passe --job-dir <dir do job do PRosettaC> — o config dele nomeia\n"
+            "as estruturas — ou --e3-pdb e --pcsk9-pdb explicitamente.")
 
     # --- SMILES do PROTAC -------------------------------------------------
     smi = args.smiles
+    if smi is None and args.job_dir:
+        # O protac.smi do job é o SMILES que o PRosettaC de fato usou. Os
+        # JSON/CSV abaixo vivem em `pipeline/`, a saída do track da CRBN.
+        ps = args.job_dir.expanduser() / "protac.smi"
+        if ps.exists() and ps.read_text().split():
+            smi = ps.read_text().split()[0]
+            print(f"SMILES: do protac.smi do job ({len(smi)} caracteres)")
     if smi is None:
         for p in (work / "pipeline" / "md" / "md_sistema.json",
                   work / "pipeline" / "md_candidato.json"):
@@ -163,7 +229,11 @@ def main():
                          f"Passe --smiles.")
 
     # --- sequências, uma entrada por cadeia -------------------------------
-    cad_e3 = [args.e3_chain] if args.e3_chain else None
+    cad_e3 = [args.e3_chain] if args.e3_chain else (
+        [cfg_cadeias["e3"]] if cfg_cadeias else None)
+    # A PCSK9 madura é de duas cadeias e o receptor preparado manteve as duas,
+    # então aqui o default continua sendo TODAS — restringir à cadeia do
+    # config daria ao Boltz-2 metade do alvo.
     cad_pc = [args.pcsk9_chain] if args.pcsk9_chain else None
     seqs_e3, falta_e3 = sequencias_por_cadeia(e3, cad_e3)
     seqs_pc, falta_pc = sequencias_por_cadeia(pcsk9, cad_pc)
