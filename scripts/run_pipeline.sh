@@ -36,10 +36,23 @@
 # ---------------------------------------------------------------------------
 set -uo pipefail
 
+# PIPELINE_CONF manda. Quatro scripts deste repositório fixavam
+# `config/pipeline.conf` — a config da CRBN — e ignoravam a variável, então nem
+# passá-la ajudava: o comando rodava no track abandonado devolvendo números com
+# cara de certo.
 CONF="${PIPELINE_CONF:-$(dirname "$0")/../config/pipeline.conf}"
+[[ -f "$CONF" ]] || [[ "$CONF" = /* ]] || CONF="$(dirname "$0")/../$CONF"
 [[ -f "$CONF" ]] || { echo "config não encontrada: $CONF"; exit 1; }
 # shellcheck disable=SC1090
 source "$CONF"
+# EXPORTADA para os filhos. O driver chama run_prosettac.sh, prosettac_prepare.sh
+# e patchdock_span_scan.sh, e cada um deles carrega a config por conta própria —
+# sem exportar, eles cairiam no default (a CRBN) mesmo com o driver na VHL.
+export PIPELINE_CONF="$CONF"
+# A CRBN foi abandonada; a guarda recusa rodar nela sem PROTAC_TRACK_OK=1.
+# shellcheck disable=SC1090
+source "$(dirname "$CONF")/guarda_de_track.sh"
+
 OBABEL_EXE="${OBABEL_EXE:-/home/soberano/miniconda3/envs/obabel_env/bin/obabel}"
 
 FROM=1; ONLY=""; DRY=0

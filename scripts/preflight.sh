@@ -24,10 +24,19 @@
 set -uo pipefail
 
 AQUI="$(cd "$(dirname "$0")" && pwd)"
+# PIPELINE_CONF manda. Quatro scripts deste repositório fixavam
+# `config/pipeline.conf` — a config da CRBN — e ignoravam a variável, então nem
+# passá-la ajudava: o comando rodava no track abandonado devolvendo números com
+# cara de certo.
 CONF="${PIPELINE_CONF:-$AQUI/../config/pipeline.conf}"
+[[ -f "$CONF" ]] || [[ "$CONF" = /* ]] || CONF="$AQUI/../$CONF"
 [[ -f "$CONF" ]] || { echo "config não encontrada: $CONF"; exit 1; }
 # shellcheck disable=SC1090
 source "$CONF"
+# A CRBN foi abandonada; a guarda recusa rodar nela sem PROTAC_TRACK_OK=1.
+# shellcheck disable=SC1090
+source "$(dirname "$CONF")/guarda_de_track.sh"
+
 
 bloqueios=0
 avisos=0

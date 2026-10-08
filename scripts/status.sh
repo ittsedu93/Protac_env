@@ -18,12 +18,24 @@
 set -uo pipefail
 
 AQUI="$(cd "$(dirname "$0")" && pwd)"
+# PIPELINE_CONF manda. Quatro scripts deste repositório fixavam
+# `config/pipeline.conf` — a config da CRBN — e ignoravam a variável, então nem
+# passá-la ajudava: o comando rodava no track abandonado devolvendo números com
+# cara de certo.
 CONF="${PIPELINE_CONF:-$AQUI/../config/pipeline.conf}"
+[[ -f "$CONF" ]] || [[ "$CONF" = /* ]] || CONF="$AQUI/../$CONF"
 # Caminho relativo passado na variável (o uso natural: PIPELINE_CONF=config/x)
 [[ -f "$CONF" ]] || [[ "$CONF" = /* ]] || CONF="$AQUI/../$CONF"
 if [[ -f "$CONF" ]]; then
   # shellcheck disable=SC1090
   source "$CONF"
+  # Só leitura: aqui a guarda AVISA em vez de recusar. Olhar o track antigo não
+  # muda nada no disco, e exigir uma flag para isso só treinaria o operador a
+  # digitar a flag sem ler.
+  if [[ "${TRACK:-CRBN}" != "VHL" ]]; then
+    echo "  [ATENÇÃO] este é o track '${TRACK:-CRBN}', ABANDONADO."
+    echo "            para a VHL: PIPELINE_CONF=config/pipeline_vhl.conf"
+  fi
 else
   echo "[aviso] config não encontrada: $CONF — usando os valores default"
 fi
