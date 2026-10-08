@@ -269,6 +269,31 @@ else
   ok "MD_TERNARIO_AUTO=0 — a fase 10 imprime os comandos e espera você"
 fi
 
+secao "WP1 — o recrutador recruta a E3 que dizemos?"
+# Esta seção existe porque a ausência dela custou sete dias de PRosettaC. O WP1
+# escolhe o recrutador por SCORE DE DOCKING e enterramento, e nenhuma das duas
+# medidas sabe que E3 a molécula de fato recruta. O recrutador escolhido para o
+# "track da VHL" era um análogo de talidomida — ligante canônico de CRBN.
+RECR=$(find "${WP1_PREP:-}" "${PIPELINE_OUT:-}" -maxdepth 4 \
+            -name "recruiter_*_H.sdf" -o -name "recruiter_*.sdf" 2>/dev/null \
+         | grep -v "_H.sdf" | sort | head -1)
+if [[ -z "${RECR:-}" ]]; then
+  aviso "não achei o SDF do recrutador para checar o quimiotipo"
+elif conda run -n "${ENV_MDTOOLS:-mdtools}" python "$AQUI/checar_recrutador.py" \
+       --e3 "${WP1_E3_LIST:-VHL}" --sdf "$RECR" >/tmp/.recr.$$ 2>&1; then
+  ok "recrutador $(basename "$RECR") tem assinatura de ${WP1_E3_LIST:-VHL}"
+  rm -f /tmp/.recr.$$
+else
+  cod=$?
+  if [[ $cod -eq 2 ]]; then
+    bloq "o recrutador recruta OUTRA E3, não a ${WP1_E3_LIST:-VHL}"
+  else
+    aviso "o recrutador não tem assinatura canônica de ${WP1_E3_LIST:-VHL}"
+  fi
+  sed 's/^/             /' /tmp/.recr.$$ | head -14
+  rm -f /tmp/.recr.$$
+fi
+
 echo
 echo "=============================================================="
 if [[ $bloqueios -gt 0 ]]; then
