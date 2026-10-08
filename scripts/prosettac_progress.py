@@ -78,6 +78,30 @@ def etapa_atual(log: Path):
     return atual, passou_docking
 
 
+def orquestrador_vivo() -> bool:
+    """O main.py do PRosettaC está vivo? Validado pelo CONTEÚDO do cmdline.
+
+    Não por padrão de texto: o caminho do job contém "PRosettaC_runs", então um
+    padrão casa o processo de quem pergunta. Mesmo critério do
+    scripts/proc_prosettac.sh — um python cujo primeiro argumento é um main.py
+    de dentro da instalação.
+    """
+    eu = str(os.getpid())
+    for entrada in Path("/proc").iterdir():
+        if not entrada.name.isdigit() or entrada.name == eu:
+            continue
+        try:
+            argv = (entrada / "cmdline").read_bytes().split(b"\0")
+        except OSError:
+            continue
+        if len(argv) < 2:
+            continue
+        c0, c1 = argv[0].decode(errors="ignore"), argv[1].decode(errors="ignore")
+        if "python" in c0 and "PRosettaC" in c1 and c1.endswith("main.py"):
+            return True
+    return False
+
+
 def serie_do_log_do_driver(pipeline_out: Path):
     """[(minutos, fila)] lidos dos heartbeats do driver, em ordem.
 
@@ -266,14 +290,49 @@ def progresso_pela_fila(d: Path):
                   f" a cada 30 min —\n  se este número não aparecer, confira se"
                   f" o driver está vivo:\n      pgrep -af esperar_results.sh")
 
-    if taxa_h and taxa_h > 0:
+    # Com a fila em zero, "falta ~0min (fim por volta de agora)" é ruído que
+    # disputa a atenção com o diagnóstico de interrupção, logo abaixo.
+    if restantes and taxa_h and taxa_h > 0:
         falta_s = restantes / taxa_h * 3600
         print(f"  falta: ~{humano(falta_s)}  (fim por volta de "
               f"{time.strftime('%d/%m %H:%M', time.localtime(agora + falta_s))})")
 
     print()
-    print("  Enquanto a fila baixa, é só esperar. O fim da etapa é o "
-          "diretório\n  Results/ aparecer.")
+    # "É SÓ ESPERAR" É UM CONSELHO, E ELE PODE ESTAR ERRADO.
+    #
+    # Em 08/10 este script imprimiu "progresso: 100%", "falta ~0min" e
+    # "enquanto a fila baixa, é só esperar" — com a fila em ZERO, o Results
+    # inexistente e nenhum processo vivo. O operador leu "esperar" diante de
+    # uma execução interrompida havia três dias. Um conselho errado é pior que
+    # nenhum: ele faz perder dias de calendário sobre trabalho já pago.
+    #
+    # Os três fatos juntos — fila vazia, sem Results, orquestrador morto — não
+    # são espera, são interrupção, e a diferença muda o que se faz hoje.
+    if restantes == 0 and not (d / "Results").is_dir():
+        if orquestrador_vivo():
+            print("  A fila zerou e o Results ainda não existe, mas o"
+                  " orquestrador está\n  VIVO — ele é quem faz o agrupamento"
+                  " final. Espere mais um pouco.")
+        else:
+            print("  *** INTERROMPIDO, não esperando.")
+            print(f"  *** Os {emitidos} jobs terminaram, o Results NÃO existe,"
+                  f" e o main.py do")
+            print("  *** PRosettaC não está vivo. Quem monta o Results é ele,")
+            print("  *** então ele não vai aparecer sozinho.")
+            print("  ***")
+            print("  *** O trabalho caro está no disco e NÃO deve ser apagado."
+                  " Para retomar")
+            print("  *** sobre ele, sem limpar:")
+            print(f"  ***     PROSETTAC_SEM_LIMPAR=1 bash scripts/run_prosettac.sh"
+                  f" {d.name}")
+            print("  ***")
+            print("  *** Antes, veja por que ele morreu — `uptime` dizendo"
+                  " poucas horas é")
+            print("  *** reinício da máquina, e aí não há nada a consertar além"
+                  " de retomar.")
+    else:
+        print("  Enquanto a fila baixa, é só esperar. O fim da etapa é o "
+              "diretório\n  Results/ aparecer.")
 
 
 def humano(seg: float) -> str:

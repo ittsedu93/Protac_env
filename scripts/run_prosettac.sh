@@ -13,6 +13,8 @@
 #   3. trazer as entradas para dentro   (copiar + reescrever o config)
 #   4. limpar restos de tentativa morta (o PRosettaC pula etapa cujo arquivo
 #                                        já existe, mesmo com zero byte)
+#                                        PROSETTAC_SEM_LIMPAR=1 pula este passo
+#                                        para RETOMAR uma execução adiantada
 #   5. validar E CONSERTAR              (arquivos, cadeias, heads, âncoras —
 #                                        head e âncora são calculáveis, então
 #                                        são corrigidos aqui, não reportados
@@ -118,8 +120,21 @@ fi
 # só os produtos que eu tinha visto naquele dia — e nomear produtos um a um é
 # uma lista que sempre está incompleta. A regra agora é a inversa: fica o que o
 # config declara como entrada, sai todo o resto.
-python "$AQUI/prosettac_clean.py" --dir . --config "$CFG_NOME" --aplicar \
-  || exit 1
+# PROSETTAC_SEM_LIMPAR=1 existe para RETOMAR. O PRosettaC pula etapa cujo
+# produto já existe — normalmente um perigo (é por isso que a limpeza existe),
+# mas quando os jobs caros já rodaram e só falta o agrupamento, é exatamente o
+# comportamento que se quer. Em 08/10 este era o caso: 2682 jobs concluídos,
+# 271 mil arquivos, orquestrador morto há 3 dias, e a guarda de "algo rodando"
+# toda negativa — limpar ali custaria sete dias de máquina.
+if [[ "${PROSETTAC_SEM_LIMPAR:-0}" == "1" ]]; then
+  echo "  [SEM LIMPAR] PROSETTAC_SEM_LIMPAR=1 — retomando sobre o que já existe."
+  echo "  O PRosettaC vai pular as etapas cujo produto está no disco. Confira"
+  echo "  no log.txt qual etapa ele anuncia: se ele reemitir os jobs que já"
+  echo "  terminaram, a retomada não pegou e aí a conversa é outra."
+else
+  python "$AQUI/prosettac_clean.py" --dir . --config "$CFG_NOME" --aplicar \
+    || exit 1
+fi
 
 echo
 echo "config:"
