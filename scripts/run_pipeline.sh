@@ -601,37 +601,35 @@ if quer 9; then
       --candidato "$CAND" --work "$(dirname "$DIRC")" \
       --corte "${TERNARIO_CORTE_A:-5.0}"
 
-  # O veredito: um grupo de modelos concordando é pose; dois modelos não são.
-  MAIOR=$(python3 -c "
-import csv, itertools, math
-import numpy as np
-f='$DIRC/concordancia_clusters.csv'
-rows=list(csv.reader(open(f)))
-nomes=rows[0][1:]
-M=np.full((len(nomes),len(nomes)), np.nan)
-for i,r in enumerate(rows[1:]):
-    for j,v in enumerate(r[1:]):
-        if v: M[i,j]=float(v)
-A=(M<=${TERNARIO_CORTE_A:-5.0}) & ~np.eye(len(nomes),dtype=bool) & ~np.isnan(M)
-melhor=[]
-def exp(at,ca):
-    global melhor
-    if len(at)>len(melhor): melhor=list(at)
-    for k,v in enumerate(ca):
-        if len(at)+len(ca)-k<=len(melhor): return
-        exp(at+[v],[u for u in ca[k+1:] if A[v,u]])
-exp([],list(range(len(nomes))))
-print(len(melhor))" 2>/dev/null || echo 0)
-  log "\n  maior grupo concordando a ${TERNARIO_CORTE_A:-5.0} Å: ${MAIOR:-?} modelos"
-  if [[ "${MAIOR:-0}" -lt "${TERNARIO_GRUPO_MIN:-5}" && $DRY -eq 0 ]]; then
+  # O VEREDITO, corrigido. A versão anterior exigia 5 REPRESENTANTES de
+  # cluster mutuamente a menos de 5 Å — e isso era quase logicamente
+  # impossível, porque o clustering.py do PRosettaC roda DBSCAN com eps = 4 Å
+  # sobre a MESMA medida: representantes de clusters distintos estão a mais de
+  # 4 Å por construção. O portão pedia que o DBSCAN tivesse produzido clusters
+  # que ele mesmo teria fundido, e o "não convergiu" que saía dali era artefato
+  # do critério. Isso se demonstra lendo os dois códigos, sem olhar resultado.
+  #
+  # A régua agora é a do PRÓPRIO PRosettaC, que imprime no result_summary.txt
+  # "Out of them N have at least 5 members": 5 membros é o que os autores da
+  # ferramenta escolheram como cluster com massa. Adotá-la não é mover o alvo —
+  # ela existia antes deste resultado e não foi calibrada por ele.
+  MEMBROS=$(python3 -c "
+from pathlib import Path
+res = Path('$DIRC/Results')
+tam = [len(list(d.rglob('*.pdb'))) for d in res.iterdir() if d.is_dir()]
+print(max(tam) if tam else 0)" 2>/dev/null || echo 0)
+  log "\n  maior cluster: ${MEMBROS:-?} membros (régua do PRosettaC: 5+)"
+  if [[ "${MEMBROS:-0}" -lt "${TERNARIO_MEMBROS_MIN:-5}" ]]; then
     log ""
-    log "*** Os modelos NÃO convergem numa interface (${MAIOR:-0} < ${TERNARIO_GRUPO_MIN:-5})."
-    log "*** Isto é resultado, não falha: nenhuma pose ternária testável saiu"
-    log "*** daqui, e levar uma pose arbitrária à MD nível (iii) seria simular"
-    log "*** uma hipótese escolhida por acaso."
+    log "*** NENHUMA pose dominante: o maior cluster tem ${MEMBROS:-0} membros,"
+    log "*** abaixo da régua de ${TERNARIO_MEMBROS_MIN:-5} da própria ferramenta."
+    log "*** Isto é resultado, não falha: não há o que levar ao método"
+    log "*** ortogonal nem à MD nível (iii)."
     log "*** Próximo candidato: MD_RANK=$(( ${MD_RANK:-1} + 1 )) em $CONF, --from 9."
     exit 5
   fi
+  log "  há pose dominante a testar — mas ela é CANDIDATA, não confirmada."
+  log "  Quem decide é o método ORTOGONAL (Boltz-2/AlphaFold 3), como o WP3 pede."
   mark_done 9
 else
   log "\n[fase 9 pulada]"
@@ -681,6 +679,23 @@ if quer 10; then
     head_ 10 "MD nível (iii) — ternário completo (dias, GPU dedicada)"
     achar_candidato "${MD_RANK:-1}" || exit 1
     log "  candidato: $CAND"
+
+    # A pose que sai da fase 9 é CANDIDATA. Levar uma pose não confirmada a
+    # 3 x 200 ns é gastar dias de GPU simulando uma hipótese que um segundo
+    # método poderia derrubar em horas — e a metodologia do WP3 pede os dois:
+    # "PRosettaC and AlphaFold 3 as orthogonal, complementary tools".
+    ORTO="$PIPELINE_OUT/ortogonal_confirmado.json"
+    if [[ ! -s "$ORTO" && "${TERNARIO_ACEITAR_SEM_ORTOGONAL:-0}" != "1" ]]; then
+      log ""
+      log "*** Falta a confirmação ORTOGONAL da pose: $ORTO"
+      log "*** A fase 9 entrega um cluster dominante, não uma pose confirmada."
+      log "*** Rode o Boltz-2 (ou o AF3) sobre este ternário e compare com o"
+      log "*** representante do maior cluster antes de gastar a GPU por dias."
+      log "***"
+      log "*** Para seguir sem isso, de propósito e declarando na tese:"
+      log "***   TERNARIO_ACEITAR_SEM_ORTOGONAL=1 em $CONF"
+      exit 10
+    fi
     [[ -d "$DIRC/Results" ]] || {
       log "*** $DIRC/Results não existe: a fase 9 não terminou"; exit 1; }
 

@@ -91,6 +91,9 @@ def main():
                     help="Å abaixo do qual dois modelos concordam")
     # Com 105 clusters de um membro cada, comparar todos é comparar ruído — e
     # imprimir 105x105 é ilegível. Entram os maiores, que são os que importam.
+    ap.add_argument("--limiar-clustering", type=float, default=4.0,
+                    help="o limiar que o clustering.py do PRosettaC usou (o "
+                         "3o argumento dele; main.py passa 4)")
     ap.add_argument("--max-clusters", type=int, default=30,
                     help="quantos clusters comparar, os de mais membros antes")
     args = ap.parse_args()
@@ -226,36 +229,79 @@ def main():
     no_dobro = len(grupos[args.corte * 2])
 
     print()
-    # O veredito sai do TAMANHO do grupo, não da menor distância da matriz. A
-    # versão anterior exigia `menor > 10 Å` para declarar ausência de
-    # concordância, e com menor = 5,4 Å (um único par, e ainda fora do corte)
-    # ela caiu em "falta amostragem" onde o certo era "não convergiu".
-    if maior <= 1 and no_dobro <= 3:
+    # ------------------------------------------------------------------
+    # O CORTE DESTA MEDIDA NÃO PODE SER COMPARÁVEL AO DO CLUSTERING.
+    #
+    # Esta é a correção de um erro de projeto que já produziu um veredito
+    # falso. O clustering.py do PRosettaC roda DBSCAN com eps = 4 Å sobre a
+    # cadeia móvel — o MESMO deslocamento que esta análise mede. Dois clusters
+    # distintos do DBSCAN, por construção, não são densamente conectados a
+    # 4 Å: os representantes deles estão a MAIS de 4 Å um do outro.
+    #
+    # Exigir 5 representantes mutuamente a menos de 5 Å é, então, pedir que o
+    # DBSCAN tenha produzido clusters que ele mesmo teria fundido. É quase
+    # logicamente impossível, e o "NÃO CONVERGIU" que sai daí é artefato do
+    # critério, não achado sobre a geometria.
+    #
+    # Isto vale a priori, lendo os dois códigos, e não porque o portão
+    # reprovou. Um portão consertado DEPOIS de falhar só é honesto quando o
+    # defeito se demonstra sem olhar o resultado — e este se demonstra.
+    # ------------------------------------------------------------------
+    piso_valido = args.limiar_clustering * 1.5
+    if args.corte <= piso_valido:
+        print(f"  [CORTE INCOMPARÁVEL] este corte ({args.corte:.1f} Å) está no"
+              f" mesmo patamar do")
+        print(f"  limiar do clustering do PRosettaC ({args.limiar_clustering:.1f} Å,"
+              f" DBSCAN sobre a mesma")
+        print(f"  medida). Representantes de clusters distintos estão a mais de"
+              f" {args.limiar_clustering:.1f} Å")
+        print(f"  POR CONSTRUÇÃO, então um grupo grande aqui seria contradição"
+              f" com o")
+        print(f"  próprio agrupamento. Nenhum veredito de convergência sai"
+              f" desta medida")
+        print(f"  com este corte — ela fica como DESCRIÇÃO da dispersão, acima.")
+        print(f"  Para um veredito desta medida, use --corte >"
+              f" {piso_valido:.1f}.")
+    elif maior <= 1 and no_dobro <= 3:
         print(f"  -> NÃO CONVERGIU. Nenhum par a menos de {args.corte:.0f} Å, e mesmo")
         print(f"     dobrando o corte o maior grupo tem {no_dobro} de {len(nomes)} modelos.")
-        print("     Uma interface convergente daria um grupo de metade dos")
-        print("     modelos no corte original. O PRosettaC não encontrou a")
-        print("     geometria ternária deste par — e isso confirma, por um")
-        print("     método independente, o que o Boltz-2 já indicava.")
     elif maior >= 5 or maior == len(nomes):
-        # `maior == len(nomes)` cobre o caso de poucos clusters: com 3 modelos
-        # todos concordando, exigir 5 daria "parcial" para uma concordância
-        # completa.
         print(f"  -> Há um grupo de {maior} modelos concordando a menos de")
-        print(f"     {args.corte:.0f} Å. O clustering do PRosettaC usa limiar mais")
-        print("     apertado e por isso os separou — mas a região é uma só, e")
-        print("     ela é candidata a pose para a MD nível (iii).")
+        print(f"     {args.corte:.0f} Å: a região é uma só, e é candidata a pose.")
     else:
-        print(f"  -> Concordância PARCIAL: o maior grupo tem {maior} modelos"
-               f" de {len(nomes)}.")
-        print("     Não sustenta uma pose única para a MD, e sustenta menos")
-        print("     ainda um veredito de ausência. Duas causas possíveis, e a")
-        print("     primeira linha do result_summary.txt separa as duas:")
-        print("       amostragem rala (poucos modelos passando a energia) ->")
-        print("         tensão do linker; escolha pose com mais folga de vão")
-        print("       amostragem boa e ainda disperso -> a interface em si não")
-        print("         é definida por este método, e o próximo passo é outra")
-        print("         E3 ou outro sítio, não mais amostragem")
+        print(f"  -> Concordância PARCIAL: o maior grupo tem {maior} de {len(nomes)}.")
+
+    # ------------------------------------------------------------------
+    # A medida que de fato responde "há uma pose dominante?" é a CONCENTRAÇÃO
+    # DA POPULAÇÃO, e não a coincidência de representantes. O critério usado
+    # aqui é o do PRÓPRIO PRosettaC, que imprime no result_summary.txt
+    # "Out of them N have at least 5 members" — ou seja, 5 membros é a régua
+    # que os autores da ferramenta escolheram. Adotá-la não é mover o alvo:
+    # ela existia antes deste resultado e não foi calibrada por ele.
+    # ------------------------------------------------------------------
+    mais_membros = max(membros.values())
+    com_massa_n = sum(v for v in membros.values() if v >= 5)
+    singletons = sum(1 for v in membros.values() if v == 1)
+    print()
+    print("  CONCENTRAÇÃO DA POPULAÇÃO (critério do próprio PRosettaC: 5+ membros)")
+    print(f"    maior cluster ............ {mais_membros} de {total_modelos} "
+          f"modelos ({100 * mais_membros / total_modelos:.0f}%)")
+    print(f"    em clusters de 5+ membros  {com_massa_n} de {total_modelos} "
+          f"({100 * com_massa_n / total_modelos:.0f}%)")
+    print(f"    clusters de 1 membro ..... {singletons} de {total_clusters}")
+    if mais_membros >= 5:
+        print(f"    -> existe pose dominante a testar: o maior cluster. Ela é")
+        print(f"       CANDIDATA, não confirmada — {100 - 100 * mais_membros / total_modelos:.0f}%"
+              f" dos modelos estão em")
+        print(f"       outras {total_clusters - 1} poses, e os representantes delas estão a")
+        print(f"       {np.median(fora):.0f} Å de mediana. Quem decide é o método ORTOGONAL")
+        print(f"       (Boltz-2/AlphaFold 3), como a metodologia do WP3 pede:")
+        print(f"       se ele cair sobre esta geometria, a pose está confirmada.")
+    else:
+        print(f"    -> NENHUMA pose dominante: o maior cluster tem"
+              f" {mais_membros} membros,")
+        print(f"       abaixo da régua de 5 da própria ferramenta. Não há o que")
+        print(f"       levar ao método ortogonal nem à MD.")
 
     saida = base / "concordancia_clusters.csv"
     with open(saida, "w", newline="") as fh:
