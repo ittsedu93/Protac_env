@@ -194,12 +194,17 @@ def varrer(caminho: Path, e3: str, coluna: str | None,
         pos, total = ranking(scores.expanduser(), col_id, col_score)
         print(f"\n  RANKING da triagem ({scores.name}, {total} ligantes):")
         for alvo in sorted(conta):
-            com_pos = sorted((pos[n] for n in conta[alvo] if n in pos))
+            com_pos = sorted(((pos[n][0], pos[n][1], n)
+                              for n in conta[alvo] if n in pos))
             if not com_pos:
                 print(f"    {alvo:<5}: nenhum dos quimiotipos está no CSV")
                 continue
-            melhores = ", ".join(f"#{p} ({s:.1f})" for p, s in com_pos[:5])
-            print(f"    {alvo:<5}: melhores posições  {melhores}")
+            # Com o NOME e não só a posição: "o melhor de quimiotipo VHL está
+            # em #4" é interessante, mas o passo seguinte precisa saber QUAL
+            # ligante é esse para olhar o exit vector dele.
+            print(f"    {alvo:<5}:")
+            for pp, ss, nn in com_pos[:6]:
+                print(f"        #{pp:<4} {nn:<14} {ss:>7.1f}")
 
     print()
     if conta.get(e3):
