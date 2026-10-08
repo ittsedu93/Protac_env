@@ -74,6 +74,98 @@ def motivos(mol):
     return achados
 
 
+def ler_biblioteca(caminho: Path, coluna: str | None):
+    """[(id, mol)] de um .sdf, .smi/.txt ou .csv. Devolve também os que falharam."""
+    suf = caminho.suffix.lower()
+    itens, falhas = [], 0
+    if suf in (".sdf", ".sd"):
+        for i, m in enumerate(Chem.SDMolSupplier(str(caminho), removeHs=True)):
+            if m is None:
+                falhas += 1
+                continue
+            nome = m.GetProp("_Name") if m.HasProp("_Name") else f"mol{i}"
+            itens.append((nome or f"mol{i}", m))
+        return itens, falhas
+    if suf == ".csv":
+        import csv as _csv
+        with open(caminho, newline="") as fh:
+            leitor = _csv.DictReader(fh)
+            cols = leitor.fieldnames or []
+            col = coluna or next(
+                (c for c in cols
+                 if c and c.lower() in ("smiles", "canonical_smiles",
+                                        "protac_smiles", "smi")), None)
+            if col is None:
+                raise SystemExit(
+                    f"não achei coluna de SMILES em {caminho.name}.\n"
+                    f"  colunas: {cols}\n  use --coluna <nome>")
+            idc = next((c for c in cols if c and "id" in c.lower()), None)
+            for i, linha in enumerate(leitor):
+                m = Chem.MolFromSmiles((linha.get(col) or "").strip())
+                if m is None:
+                    falhas += 1
+                    continue
+                itens.append((linha.get(idc) or f"linha{i}", m))
+        return itens, falhas
+    # .smi / .txt: SMILES no primeiro campo, nome no segundo se houver
+    for i, linha in enumerate(caminho.read_text(errors="ignore").splitlines()):
+        campos = linha.split()
+        if not campos:
+            continue
+        m = Chem.MolFromSmiles(campos[0])
+        if m is None:
+            falhas += 1
+            continue
+        itens.append((campos[1] if len(campos) > 1 else f"linha{i}", m))
+    return itens, falhas
+
+
+def varrer(caminho: Path, e3: str, coluna: str | None):
+    """A pergunta decisiva: a biblioteca TEM ligante da E3 que queremos?
+
+    Refazer a triagem com filtro de quimiotipo só funciona se houver o que
+    filtrar. Se a biblioteca não contém nenhum ligante de VHL, nenhuma
+    quantidade de triagem nova encontra um — e a única saída é usar um
+    recrutador conhecido da literatura. Uma busca de segundos separa as duas
+    situações, e sem ela a escolha entre os caminhos seria palpite.
+    """
+    if not caminho.exists():
+        raise SystemExit(f"não achei {caminho}")
+    itens, falhas = ler_biblioteca(caminho, coluna)
+    print(f"biblioteca: {caminho.name}")
+    print(f"  {len(itens)} moléculas lidas"
+          + (f", {falhas} não parsearam" if falhas else ""))
+    if not itens:
+        raise SystemExit("  nenhuma molécula legível")
+
+    conta = {a: [] for a in ASSINATURAS}
+    for nome, m in itens:
+        for alvo, lista in motivos(m).items():
+            if any(s for _, s in lista):
+                conta[alvo].append(nome)
+    print()
+    for alvo in sorted(conta):
+        n = len(conta[alvo])
+        pct = 100 * n / len(itens)
+        print(f"  quimiotipo de {alvo:<5}: {n:>6} de {len(itens)} ({pct:.1f}%)")
+        if n:
+            print(f"      ex.: {', '.join(str(x) for x in conta[alvo][:4])}")
+    print()
+    if conta.get(e3):
+        print(f"  A biblioteca TEM {len(conta[e3])} candidato(s) com quimiotipo"
+              f" de {e3}.")
+        print(f"  Refazer a triagem restringindo a eles é viável.")
+        return 0
+    print(f"  *** A biblioteca NÃO TEM nenhuma molécula com quimiotipo"
+          f" de {e3}.")
+    print(f"  *** Refazer a triagem não resolve: não há o que a triagem possa")
+    print(f"  *** encontrar. O caminho é usar um recrutador conhecido de {e3}")
+    print(f"  *** (para VHL, o scaffold VH032 / (2S,4R)-4-hidroxiprolina, que")
+    print(f"  *** tem estrutura cristalográfica e dezenas de PROTACs")
+    print(f"  *** publicados), em vez de procurar um.")
+    return 2
+
+
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__,
@@ -84,7 +176,16 @@ def main():
     g.add_argument("--smiles")
     g.add_argument("--protac-smi", type=Path,
                    help="o protac.smi do job: confere a molécula inteira")
+    g.add_argument("--biblioteca", type=Path,
+                   help="varre uma biblioteca (.sdf, .smi, .csv) e conta "
+                        "quantas moléculas têm quimiotipo de cada E3")
+    ap.add_argument("--coluna", default=None,
+                    help="nome da coluna de SMILES, para --biblioteca em CSV")
     args = ap.parse_args()
+
+    if args.biblioteca:
+        return varrer(args.biblioteca.expanduser(), args.e3.upper(),
+                      args.coluna)
 
     if args.sdf:
         mol = next(iter(Chem.SDMolSupplier(str(args.sdf.expanduser()),
