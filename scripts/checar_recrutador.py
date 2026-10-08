@@ -75,9 +75,21 @@ def motivos(mol):
 
 
 def ler_biblioteca(caminho: Path, coluna: str | None):
-    """[(id, mol)] de um .sdf, .smi/.txt ou .csv. Devolve também os que falharam."""
-    suf = caminho.suffix.lower()
+    """[(id, mol)] de um .sdf, .smi/.txt, .csv ou DIRETÓRIO de .sdf."""
     itens, falhas = [], 0
+    # O prep/ligands guarda um .sdf por ligante (ligand_087.sdf), não um
+    # arquivo único. Varrer o diretório é o que responde "a biblioteca tem
+    # ligante de VHL?" — pedir ao operador um `for` no shell daria uma
+    # contagem por arquivo em vez da contagem agregada, que é a pergunta.
+    if caminho.is_dir():
+        for f in sorted(caminho.glob("*.sdf")):
+            m = next(iter(Chem.SDMolSupplier(str(f), removeHs=True)), None)
+            if m is None:
+                falhas += 1
+                continue
+            itens.append((f.stem, m))
+        return itens, falhas
+    suf = caminho.suffix.lower()
     if suf in (".sdf", ".sd"):
         for i, m in enumerate(Chem.SDMolSupplier(str(caminho), removeHs=True)):
             if m is None:
@@ -120,7 +132,30 @@ def ler_biblioteca(caminho: Path, coluna: str | None):
     return itens, falhas
 
 
-def varrer(caminho: Path, e3: str, coluna: str | None):
+def ranking(scores: Path, col_id: str, col_score: str):
+    """{id: (posição, score)} — posição 1 é o melhor (score mais negativo)."""
+    import csv as _csv
+    linhas = []
+    with open(scores) as fh:
+        leitor = _csv.DictReader(fh)
+        if col_id not in (leitor.fieldnames or []) or \
+                col_score not in (leitor.fieldnames or []):
+            raise SystemExit(
+                f"{scores.name} não tem '{col_id}'/'{col_score}'.\n"
+                f"  colunas: {leitor.fieldnames}\n"
+                f"  use --coluna-id e --coluna-score")
+        for l in leitor:
+            try:
+                linhas.append((l[col_id], float(l[col_score])))
+            except (TypeError, ValueError):
+                continue
+    linhas.sort(key=lambda t: t[1])      # mais negativo = melhor
+    return {i: (pos, s) for pos, (i, s) in enumerate(linhas, 1)}, len(linhas)
+
+
+def varrer(caminho: Path, e3: str, coluna: str | None,
+           scores: Path | None = None, col_id: str = "ligand_id",
+           col_score: str = "best_score"):
     """A pergunta decisiva: a biblioteca TEM ligante da E3 que queremos?
 
     Refazer a triagem com filtro de quimiotipo só funciona se houver o que
@@ -150,6 +185,22 @@ def varrer(caminho: Path, e3: str, coluna: str | None):
         print(f"  quimiotipo de {alvo:<5}: {n:>6} de {len(itens)} ({pct:.1f}%)")
         if n:
             print(f"      ex.: {', '.join(str(x) for x in conta[alvo][:4])}")
+    # --- o quimiotipo CONTRA o ranking da triagem -------------------------
+    # A pergunta de método: existindo ligante do quimiotipo certo, o score o
+    # teria encontrado? Se ele existe e ficou no fim do ranking, o problema
+    # não é a biblioteca — é a função de score não discriminar o bolso, e isso
+    # é um achado, não um contratempo.
+    if scores and scores.exists():
+        pos, total = ranking(scores.expanduser(), col_id, col_score)
+        print(f"\n  RANKING da triagem ({scores.name}, {total} ligantes):")
+        for alvo in sorted(conta):
+            com_pos = sorted((pos[n] for n in conta[alvo] if n in pos))
+            if not com_pos:
+                print(f"    {alvo:<5}: nenhum dos quimiotipos está no CSV")
+                continue
+            melhores = ", ".join(f"#{p} ({s:.1f})" for p, s in com_pos[:5])
+            print(f"    {alvo:<5}: melhores posições  {melhores}")
+
     print()
     if conta.get(e3):
         print(f"  A biblioteca TEM {len(conta[e3])} candidato(s) com quimiotipo"
@@ -177,15 +228,23 @@ def main():
     g.add_argument("--protac-smi", type=Path,
                    help="o protac.smi do job: confere a molécula inteira")
     g.add_argument("--biblioteca", type=Path,
-                   help="varre uma biblioteca (.sdf, .smi, .csv) e conta "
-                        "quantas moléculas têm quimiotipo de cada E3")
+                   help="varre uma biblioteca e conta quantas moléculas têm "
+                        "quimiotipo de cada E3. Aceita .sdf, .smi, .csv ou um "
+                        "DIRETÓRIO de .sdf (é assim que o prep/ligands guarda)")
     ap.add_argument("--coluna", default=None,
                     help="nome da coluna de SMILES, para --biblioteca em CSV")
+    ap.add_argument("--scores", type=Path, default=None,
+                    help="CSV da triagem (ligand_id, best_score). Junta o "
+                         "quimiotipo com o RANKING: responde se o score teria "
+                         "achado o ligante certo, caso ele exista")
+    ap.add_argument("--coluna-id", default="ligand_id")
+    ap.add_argument("--coluna-score", default="best_score")
     args = ap.parse_args()
 
     if args.biblioteca:
         return varrer(args.biblioteca.expanduser(), args.e3.upper(),
-                      args.coluna)
+                      args.coluna, args.scores, args.coluna_id,
+                      args.coluna_score)
 
     if args.sdf:
         mol = next(iter(Chem.SDMolSupplier(str(args.sdf.expanduser()),
