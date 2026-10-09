@@ -55,6 +55,66 @@ RDLogger.DisableLog("rdApp.*")
 
 DESVIO_MAX_A = 1e-3     # renumerar não move átomo; isto é folga de float
 
+# A QUE GRUPO o ponto de conjugação pertence. O filtro de farmacóforo do WP1 é
+# genérico — ele procura doadores/aceptores de H e cargas — e por isso NÃO
+# distingue uma metila de tiazol (ponto de conjugação usado em PROTACs de VHL
+# publicados) de uma metila de terc-butilo (elemento de ligação enterrado no
+# bolso). As duas são CH3 sem farmacóforo nenhum, e escolher a segunda destrói
+# o reconhecimento sem disparar guarda alguma.
+# Classifico só o que sei classificar. O resto sai como NAO RECONHECIDO, e isso
+# NÃO é um passe: a lista de pontos de conjugação válidos não é enumerável por
+# mim, então o que eu não reconheço fica para o olho humano no SMILES marcado.
+# Tratar desconhecido como "ok" seria um passe silencioso sobre justamente o
+# que eu não previ — o mesmo mecanismo que deixou um ligante de CRBN passar por
+# recrutador de VHL.
+GRUPOS_DO_PONTO = [
+    ("metila de terc-butilo", "[CH3]C([CH3])([CH3])", "PROIBIDO"),
+    ("metila substituinte de anel aromático", "[CH3]c", "ok"),
+    ("carbono alifático periférico", "[CH3,CH2][CH2,CH1,NX3,OX2]", "ok"),
+    ("metila de acetamida (N-cap do scaffold)", "[CH3]C(=O)N", "ATENCAO"),
+    ("hidroxila", "[OX2H]", "ATENCAO"),
+    ("posição C-H de anel aromático", "[cH]", "ATENCAO"),
+]
+
+
+def ambiente_do_atomo0(mol):
+    """(linhas, pior_risco) descrevendo a que grupo o átomo 0 pertence."""
+    a0 = mol.GetAtomWithIdx(0)
+    linhas = [f"átomo 0: {a0.GetSymbol()}, {a0.GetTotalNumHs()} H, "
+              f"grau {a0.GetDegree()}, aromático={a0.GetIsAromatic()}"]
+    for n in a0.GetNeighbors():
+        linhas.append(f"  vizinho: {n.GetSymbol()} (grau {n.GetDegree()}, "
+                      f"anel={n.IsInRing()}, aromático={n.GetIsAromatic()})")
+    marc = Chem.Mol(mol)
+    marc.GetAtomWithIdx(0).SetAtomMapNum(1)
+    linhas.append(f"  SMILES com o ponto marcado [:1]:")
+    linhas.append(f"    {Chem.MolToSmiles(marc)}")
+    pior, achados = None, []
+    for nome, sma, risco in GRUPOS_DO_PONTO:
+        q = Chem.MolFromSmarts(sma)
+        if q is None:
+            continue
+        if any(0 in m for m in mol.GetSubstructMatches(q)):
+            achados.append((nome, risco))
+            if risco == "PROIBIDO":
+                pior = "PROIBIDO"
+            elif risco == "ATENCAO" and pior != "PROIBIDO":
+                pior = "ATENCAO"
+            elif pior is None:
+                pior = "ok"
+    if achados:
+        linhas.append("  grupos que contêm o átomo 0: "
+                      + ", ".join(f"{n} [{r}]" for n, r in achados))
+    else:
+        pior = "NAO RECONHECIDO"
+        linhas.append("  o átomo 0 não casa com nenhum grupo que eu saiba"
+                      " classificar.")
+        linhas.append("  Isto NÃO é aprovação: leia o SMILES marcado acima e"
+                      " confirme que o")
+        linhas.append("  ponto é periférico e não participa do reconhecimento"
+                      " pela E3.")
+    return linhas, pior
+
 
 def coords_receptor(pdb: Path) -> np.ndarray:
     xyz = [[float(l[30:38]), float(l[38:46]), float(l[46:54])]
@@ -78,7 +138,23 @@ def main():
     ap.add_argument("--pipeline-out", type=Path, default=None,
                     help="$PIPELINE_OUT: lista os marcadores .done_* obsoletos")
     ap.add_argument("--burial", type=int, default=20)
+    ap.add_argument("--so-ambiente", type=Path, default=None,
+                    help="só descreve a que grupo pertence o átomo 0 de um SDF "
+                         "já escrito, e sai")
+    ap.add_argument("--aceitar-ponto-proibido", action="store_true")
     args = ap.parse_args()
+
+    if args.so_ambiente:
+        m = next(iter(Chem.SDMolSupplier(str(args.so_ambiente.expanduser()),
+                                         removeHs=True)), None)
+        if m is None:
+            raise SystemExit(f"não li {args.so_ambiente}")
+        print(f"{args.so_ambiente.name}")
+        linhas, pior = ambiente_do_atomo0(m)
+        for l in linhas:
+            print("  " + l)
+        print(f"\n  risco: {pior}")
+        return 0 if pior != "PROIBIDO" else 2
 
     e3 = args.e3.upper()
     lig_p = args.ligante.expanduser()
@@ -138,6 +214,21 @@ def main():
             f"\n*** É exatamente a condição que o WP2 exige, e ela falhou.")
     print(f"      átomo 0 = {a0.GetSymbol()}, {a0.GetTotalNumHs()} H — "
           f"é o que o WP2 exige")
+    linhas, pior = ambiente_do_atomo0(novo)
+    for l in linhas:
+        print("      " + l)
+    if pior == "PROIBIDO" and not args.aceitar_ponto_proibido:
+        raise SystemExit(
+            "\n*** o ponto de conjugação está num TERC-BUTILO. Esse grupo é"
+            " elemento\n*** de ligação do scaffold VH032, enterrado no bolso da"
+            " VHL — pendurar o\n*** linker nele destrói o reconhecimento, e o"
+            " filtro de farmacóforo não\n*** pega isso porque uma metila não"
+            " tem farmacóforo nenhum.\n*** \n"
+            "*** Escolha outro ponto, ou --aceitar-ponto-proibido se souber"
+            " por quê.")
+    if pior in ("ATENCAO", "NAO RECONHECIDO"):
+        print(f"      [ATENÇÃO] risco {pior}: confira o SMILES marcado acima"
+              f" antes de gastar dias de máquina")
 
     xyz_depois = novo.GetConformer().GetPositions()
     # a ordem mudou, então compara CONJUNTO de posições, não posição a posição
