@@ -13,6 +13,9 @@
 # Dois limites independentes, e o mais apertado vence
 # ---------------------------------------------------
 #   --max-consumo-gb   o que ESTE comando escreveu. É o limite do operador.
+#   --ao-matar         comando a rodar DEPOIS de matar o grupo, para alcançar
+#                      quem escreve fora dele (o caso real: `scancel -u $USER`,
+#                      porque os jobs do PRosettaC rodam sob o slurmd)
 #   --piso-gb          o livre absoluto do disco. Protege a máquina mesmo que
 #                      quem esteja enchendo seja outra pessoa.
 #
@@ -79,6 +82,7 @@ INTERVALO=2
 INTERVALO_DU=30
 MAX_ARQ_GB=20
 CONSUMO_SO_DU=0
+AO_MATAR=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --max-consumo-gb) MAX_GB="$2"; shift 2;;
@@ -89,6 +93,7 @@ while [[ $# -gt 0 ]]; do
     --intervalo-du)   INTERVALO_DU="$2"; shift 2;;
     --max-arquivo-gb) MAX_ARQ_GB="$2"; shift 2;;
     --consumo-so-du)  CONSUMO_SO_DU=1; shift;;
+    --ao-matar)       AO_MATAR="$2"; shift 2;;
     --) shift; break;;
     *) echo "opção desconhecida: $1"; exit 1;;
   esac
@@ -126,6 +131,7 @@ echo "  o comando pode escrever no máximo ..... ${MAX_GB} GB"
 echo "  deixando livre, no pior caso .......... $(gb "$PISO_DERIVADO_MB") GB"
 echo "  e eu mato antes disso se o livre tocar  ${PISO_GB} GB"
 echo "  nenhum arquivo individual passa de .... ${MAX_ARQ_GB} GB (limite de kernel)"
+[[ -n "$AO_MATAR" ]] && echo "  ao matar, rodo também .................. $AO_MATAR"
 echo "  medindo: df a cada ${INTERVALO}s, du a cada ${INTERVALO_DU}s"
 if [[ "$CONSUMO_SO_DU" == "1" ]]; then
   echo "  teto de consumo julgado SÓ pelo du (o df guarda apenas o piso)"
@@ -175,6 +181,18 @@ while kill -0 "$PG" 2>/dev/null; do
     kill -TERM -"$PG" 2>/dev/null
     sleep 5
     kill -KILL -"$PG" 2>/dev/null
+    # Matar o grupo não alcança quem escreve FORA dele. O caso concreto é o
+    # PRosettaC: ele submete ao SLURM, e os jobs rodam sob o slurmd, em outro
+    # grupo de processos — matar o orquestrador impede novas submissões, mas
+    # os jobs já na fila continuam escrevendo. Sem isto, o teto de disco é uma
+    # promessa que a etapa mais cara do pipeline não cumpre.
+    if [[ -n "$AO_MATAR" ]]; then
+      echo "*** rodando o --ao-matar: $AO_MATAR"
+      # ${PIPESTATUS[0]} e não $?: depois de um pipe, o $? e o do sed, e
+      # relatar o codigo do sed como se fosse o do comando e informar errado.
+      bash -c "$AO_MATAR" 2>&1 | sed 's/^/    /'
+      echo "*** --ao-matar terminou com código ${PIPESTATUS[0]}"
+    fi
     break
   fi
 done
