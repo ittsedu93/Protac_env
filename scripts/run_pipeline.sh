@@ -4,6 +4,7 @@
 #
 #   bash scripts/run_pipeline.sh                # tudo que estiver pendente
 #   bash scripts/run_pipeline.sh --from 4       # retoma da fase 4
+#   bash scripts/run_pipeline.sh --from 5 --to 7  # da 5 até a 7, e para
 #   bash scripts/run_pipeline.sh --only 3       # só a fase 3
 #   bash scripts/run_pipeline.sh --list         # o que já está feito
 #   bash scripts/run_pipeline.sh --dry-run      # imprime sem executar
@@ -55,10 +56,11 @@ source "$(dirname "$CONF")/guarda_de_track.sh"
 
 OBABEL_EXE="${OBABEL_EXE:-/home/soberano/miniconda3/envs/obabel_env/bin/obabel}"
 
-FROM=1; ONLY=""; DRY=0
+FROM=1; ONLY=""; TO=""; DRY=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --from) FROM="$2"; shift 2;;
+    --to)   TO="$2"; shift 2;;
     --only) ONLY="$2"; shift 2;;
     --dry-run) DRY=1; shift;;
     --list) LIST=1; shift;;
@@ -162,19 +164,40 @@ fi
 quer() {  # quer <n> -> deve rodar esta fase?
   local n="$1"
   [[ -n "$ONLY" ]] && { [[ "$ONLY" == "$n" ]]; return; }
-  local i_n i_from
+  local i_n i_from i_to
   i_n=$(indice_da_fase "$n")
   i_from=$(indice_da_fase "$FROM")
   if [[ "$i_from" == "-1" ]]; then
     echo "*** --from $FROM não é uma fase. As fases são: ${FASES[*]}" >&2
     exit 1
   fi
-  (( i_n >= i_from )) && ! is_done "$n"
+  (( i_n >= i_from )) || return 1
+  # O --to existe porque as fases desta lista não custam a mesma coisa, nem de
+  # longe: 5, 6, 6a, 6b e 7 somam meia hora e uns poucos GB; a 9 é o PRosettaC,
+  # dias e ~90 GB. Numa workstation compartilhada elas têm de ser lançadas sob
+  # TETOS DE DISCO diferentes — e sem --to, `--from 5` entra na 9 dentro do
+  # mesmo processo, debaixo do teto pequeno, e a trava mata o PRosettaC no
+  # primeiro minuto. `--only` por fase daria o mesmo efeito em cinco comandos;
+  # cinco comandos é onde se erra um.
+  if [[ -n "$TO" ]]; then
+    i_to=$(indice_da_fase "$TO")
+    if [[ "$i_to" == "-1" ]]; then
+      echo "*** --to $TO não é uma fase. As fases são: ${FASES[*]}" >&2
+      exit 1
+    fi
+    (( i_n <= i_to )) || return 1
+  fi
+  ! is_done "$n"
 }
 
 log "pipeline iniciado $(date -Is)"
 log "config: $CONF"
 log "log:    $LOG"
+if [[ -n "$ONLY" ]]; then
+  log "fases:  só a $ONLY"
+else
+  log "fases:  da $FROM até ${TO:-a última (${FASES[-1]})}"
+fi
 
 # ===========================================================================
 # FASE 1 — warheads PCSK9
