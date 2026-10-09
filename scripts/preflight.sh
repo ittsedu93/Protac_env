@@ -215,8 +215,17 @@ secao "fase 10 — MD do ternário (nível iii)"
 # chamado depois de o PRosettaC ter rodado dias; o MDAnalysis só no fim da
 # produção; o disco enche no meio da terceira réplica. Um `import` que custa
 # um segundo agora vale horas depois.
-tem_exe "${ACPYPE_EXE:-$HOME/miniconda3/envs/mdtools/bin/acpype}" \
-        "acpype (GAFF2/AM1-BCC do PROTAC)"
+# Sem default próprio: o default vive na config, que o md_run.sh também lê.
+# Dois defaults diferentes para o mesmo executável foi o que fez este preflight
+# bloquear por um caminho que a MD nunca usaria.
+if [[ -z "${ACPYPE_EXE:-}" ]]; then
+  bloq "não achei o acpype em nenhum caminho conhecido. Descubra onde ele está
+             (conda run -n ${ENV_MDTOOLS:-mdtools} which acpype) e acrescente o
+             caminho à lista de candidatos em config/pipeline.conf, ou rode com
+             ACPYPE_EXE=/caminho/acpype. Só a fase 10 precisa dele."
+else
+  tem_exe "$ACPYPE_EXE" "acpype (GAFF2/AM1-BCC do PROTAC)"
+fi
 
 if conda run -n "${ENV_MDTOOLS:-mdtools}" python -c \
      "import MDAnalysis; from MDAnalysis.lib.distances import capped_distance" \

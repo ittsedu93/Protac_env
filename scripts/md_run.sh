@@ -29,7 +29,24 @@ INFO="$MD_DIR/md_sistema.json"
 [[ -f "$INFO" ]] || { echo "não achei $INFO — rode md_prepare.py antes"; exit 1; }
 
 GMX="${GMX_EXE:-/usr/local/gromacs/bin/gmx}"
-ACPYPE="${ACPYPE_EXE:-/home/soberano/miniconda3/envs/mdtools/bin/acpype}"
+
+# O caminho do acpype vive em config/pipeline.conf, não aqui. Ter um default
+# PRÓPRIO nesta linha foi o defeito: o preflight tinha o seu, diferente, e
+# bloqueava por um caminho que esta linha nunca usaria. O driver exporta a
+# variável; rodando este script à mão, leio a config eu mesmo.
+if [[ -z "${ACPYPE_EXE:-}" ]]; then
+  _RAIZ="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  _CONF="${PIPELINE_CONF:-$_RAIZ/config/pipeline.conf}"
+  [[ "$_CONF" = /* ]] || _CONF="$_RAIZ/$_CONF"
+  # shellcheck disable=SC1090
+  [[ -f "$_CONF" ]] && source "$_CONF"
+fi
+ACPYPE="${ACPYPE_EXE:-}"
+if [[ -z "$ACPYPE" || ! -x "$ACPYPE" ]]; then
+  echo "não achei o acpype executável (ACPYPE_EXE='${ACPYPE_EXE:-vazio}')."
+  echo "rode  bash scripts/preflight.sh  — ele diz o que fazer."
+  exit 1
+fi
 
 jq_() { python3 -c "import json;print(json.load(open('$INFO'))['$1'])"; }
 
