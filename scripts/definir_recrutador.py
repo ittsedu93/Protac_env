@@ -67,6 +67,19 @@ DESVIO_MAX_A = 1e-3     # renumerar não move átomo; isto é folga de float
 # Tratar desconhecido como "ok" seria um passe silencioso sobre justamente o
 # que eu não previ — o mesmo mecanismo que deixou um ligante de CRBN passar por
 # recrutador de VHL.
+# Nota sobre o terc-butilo, porque eu justifiquei errado antes: eu disse que
+# ele e "enterrado no bolso". A medicao na pose cristalografica do 6GFZ diz o
+# contrario — as tres metilas dele tem 2, 7 e 14 atomos de proteina a 6 A, e a
+# primeira e o atomo MAIS exposto da molecula inteira. Foi justamente por isso
+# que a heuristica, que ordena por enterramento, escolheu uma delas.
+#
+# A regra continua valendo, por outro motivo: o terc-butilo da terc-leucina e
+# parte do motivo de reconhecimento conservado do scaffold VH032, a SAR
+# publicada mostra que ele importa para a afinidade, e NENHUM PROTAC de VHL
+# publicado ancora o linker nele. Trocar uma metila de um carbono quaternario
+# por uma cadeia longa e uma perturbacao grande num elemento de reconhecimento.
+# "Exposto" e "disponivel" nao sao a mesma coisa, e era a confusao entre as
+# duas que a heuristica cometia.
 GRUPOS_DO_PONTO = [
     ("metila de terc-butilo", "[CH3]C([CH3])([CH3])", "PROIBIDO"),
     ("metila substituinte de anel aromático", "[CH3]c", "ok"),
@@ -123,6 +136,26 @@ def coords_receptor(pdb: Path) -> np.ndarray:
     if not xyz:
         raise SystemExit(f"nenhum registro ATOM em {pdb}")
     return np.array(xyz)
+
+
+def direcao_aponta_para_fora(pos_ponto, direcao, rec, passos=(2.0, 4.0, 6.0),
+                             raio=5.0):
+    """Andando ao longo da direção de saída, a proteína fica mais perto ou mais longe?
+
+    O linker cresce nessa direção. Se ela aponta para dentro da proteína, o WP2
+    rejeita todo linker por clash — o que custa minutos e é visível. Pior é o
+    caso intermediário: ela raspa a superfície, sobram poucos sub-complexos
+    tensos, e eles passam adiante sem aviso para as fases 6b e 7.
+
+    A conta é direta: conta átomos de proteína a `raio` de pontos ao longo do
+    vetor. Crescendo, a direção entra na proteína.
+    """
+    saida = []
+    for d in passos:
+        q = np.asarray(pos_ponto) + np.asarray(direcao) * d
+        n = int((np.linalg.norm(rec - q, axis=1) <= raio).sum())
+        saida.append((d, n))
+    return saida
 
 
 def listar_pontos(mol, rec, raio=6.0):
@@ -336,6 +369,25 @@ def main():
         raise SystemExit(
             f"\n*** o átomo {ev['atom_idx']} não tem H para ceder ao linker.")
     print(f"      OK: átomo pesado, com H, fora do farmacóforo")
+
+    # A direção importa tanto quanto o ponto: é nela que o linker cresce.
+    perfil = direcao_aponta_para_fora(ev["exit_point"], ev["exit_direction"], rec)
+    txt = ", ".join(f"{d:.0f} Å: {n}" for d, n in perfil)
+    print(f"      proteína ao longo da direção (átomos a 5 Å) — {txt}")
+    ev["perfil_da_direcao"] = [[d, n] for d, n in perfil]
+    if perfil[-1][1] > perfil[0][1]:
+        raise SystemExit(
+            f"\n*** a direção de saída APONTA PARA DENTRO da proteína: a"
+            f" contagem\n*** sobe de {perfil[0][1]} para {perfil[-1][1]} ao"
+            f" andar 6 Å. O linker cresceria\n*** contra a parede do bolso, e o"
+            f" WP2 rejeitaria tudo por clash.\n*** \n"
+            f"*** Escolha outro ponto: --listar-pontos mostra os candidatos.")
+    if perfil[-1][1] > 0:
+        print(f"      [ATENÇÃO] ainda há {perfil[-1][1]} átomos de proteína a"
+              f" 6 Å na direção —\n      o linker vai raspar a superfície."
+              f" Se o WP2 devolver poucos sub-complexos,\n      a causa é esta.")
+    else:
+        print(f"      OK: a direção sai para o solvente")
 
     # --- PORTÃO 3 + 4: átomo 0 e coordenadas ------------------------------
     idx = int(ev["atom_idx"])
