@@ -125,6 +125,55 @@ def coords_receptor(pdb: Path) -> np.ndarray:
     return np.array(xyz)
 
 
+def listar_pontos(mol, rec, raio=6.0):
+    """Todo átomo pesado com H, classificado e com o enterramento MEDIDO.
+
+    Por que isto existe
+    -------------------
+    A heurística do WP1 escolhe o átomo exposto mais distante do núcleo
+    enterrado, excluindo farmacóforo. Para o ligante do cristal da VHL ela
+    escolheu uma metila do TERC-BUTILO — que é elemento de ligação do scaffold
+    VH032, e que nenhum SMARTS de farmacóforo marca, porque uma metila não tem
+    farmacóforo.
+
+    Num scaffold cuja química é conhecida, quem decide o vetor de saída é a
+    química, não o enterramento. Então aqui não se escolhe: MEDE-SE e lista-se,
+    e a escolha é explícita (--ponto-idx). O enterramento entra como dado da
+    pose cristalográfica, não como critério único.
+    """
+    pos = mol.GetConformer().GetPositions()
+    d = np.linalg.norm(pos[:, None, :] - rec[None, :, :], axis=2)
+    nb = (d <= raio).sum(axis=1)
+    centro = pos[np.argsort(nb)[-max(2, len(nb) // 3):]].mean(axis=0)
+
+    linhas = []
+    for a in mol.GetAtoms():
+        if a.GetTotalNumHs() < 1:
+            continue
+        i = a.GetIdx()
+        risco, grupo = "ok", "—"
+        for nome, sma, r in GRUPOS_DO_PONTO:
+            q = Chem.MolFromSmarts(sma)
+            if q is not None and any(i in mm for mm in mol.GetSubstructMatches(q)):
+                if r == "PROIBIDO" or (r == "ATENCAO" and risco == "ok"):
+                    risco, grupo = r, nome
+                elif risco == "ok":
+                    grupo = nome
+        viz = ",".join(n.GetSymbol() + ("(ar)" if n.GetIsAromatic() else "")
+                       for n in a.GetNeighbors())
+        linhas.append({
+            "idx": i, "el": a.GetSymbol(), "nH": a.GetTotalNumHs(),
+            "arom": a.GetIsAromatic(), "vizinhos": viz,
+            "vizinhos_proteicos": int(nb[i]),
+            "dist_nucleo": float(np.linalg.norm(pos[i] - centro)),
+            "grupo": grupo, "risco": risco,
+        })
+    # mais exposto primeiro; proibidos no fim
+    linhas.sort(key=lambda r: (r["risco"] == "PROIBIDO",
+                              r["vizinhos_proteicos"], -r["dist_nucleo"]))
+    return linhas
+
+
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__,
@@ -142,6 +191,19 @@ def main():
                     help="só descreve a que grupo pertence o átomo 0 de um SDF "
                          "já escrito, e sai")
     ap.add_argument("--aceitar-ponto-proibido", action="store_true")
+    ap.add_argument("--listar-pontos", action="store_true",
+                    help="lista os candidatos a ponto de conjugação com o "
+                         "enterramento medido na pose, e sai")
+    ap.add_argument("--ponto-smarts", default=None,
+                    help="escolhe o ponto de conjugação por QUÍMICA, não por "
+                         "posição: o SMARTS tem de casar exatamente um átomo "
+                         "com H. Reprodutível entre SDFs de ordem diferente, "
+                         "que é o que a tese precisa poder citar")
+    ap.add_argument("--ponto-idx", type=int, default=None,
+                    help="escolhe o ponto de conjugação EXPLICITAMENTE, pelo "
+                         "índice no SDF de entrada. A direção de saída passa a "
+                         "ser o vetor da ligação vizinho->átomo, que é a "
+                         "definição química de vetor de saída")
     args = ap.parse_args()
 
     if args.so_ambiente:
@@ -183,10 +245,83 @@ def main():
 
     # --- PORTÃO 2: vetor de saída -----------------------------------------
     rec = coords_receptor(args.receptor.expanduser())
-    ev = exit_vector_do_recrutador(mol, rec, burial=args.burial, mol_ref=None)
-    print(f"\n[2/5] vetor de saída")
+
+    if args.listar_pontos:
+        print("\ncandidatos a ponto de conjugação, mais EXPOSTO primeiro")
+        print("(enterramento = átomos de proteína a 6 Å, medido NESTA pose)\n")
+        print(f"  {'idx':>4} {'el':<4} {'nH':>2} {'viz.prot':>9} "
+              f"{'d.núcleo':>9}  risco      grupo / vizinhos")
+        for r in listar_pontos(mol, rec):
+            mark = "  <-- PROIBIDO" if r["risco"] == "PROIBIDO" else ""
+            print(f"  {r['idx']:>4} {r['el'] + ('(ar)' if r['arom'] else ''):<4} "
+                  f"{r['nH']:>2} {r['vizinhos_proteicos']:>9} "
+                  f"{r['dist_nucleo']:>9.2f}  {r['risco']:<10} "
+                  f"{r['grupo']} [{r['vizinhos']}]{mark}")
+        print("\n  Escolha um com --ponto-idx N. O mais exposto e quimicamente")
+        print("  periférico é o candidato natural; a decisão é química, e por")
+        print("  isso ela é sua e não da heurística.")
+        return 0
+
+    if args.ponto_smarts:
+        q = Chem.MolFromSmarts(args.ponto_smarts)
+        if q is None:
+            raise SystemExit(f"SMARTS inválido: {args.ponto_smarts}")
+        # O primeiro átomo do SMARTS é o ponto de conjugação, e ele tem de ter
+        # H. Casar vários átomos com H seria ambíguo, e ambiguidade aqui vira
+        # um PROTAC ligado num lugar que ninguém escolheu.
+        alvos = sorted({m[0] for m in mol.GetSubstructMatches(q)
+                        if mol.GetAtomWithIdx(m[0]).GetTotalNumHs() >= 1})
+        if not alvos:
+            raise SystemExit(
+                f"o SMARTS '{args.ponto_smarts}' não casou nenhum átomo com H."
+                f"\n  Rode --listar-pontos para ver os candidatos.")
+        if len(alvos) > 1:
+            raise SystemExit(
+                f"o SMARTS '{args.ponto_smarts}' casou {len(alvos)} átomos com"
+                f" H: {alvos}.\n  Precisa ser exatamente um — torne o padrão"
+                f" mais específico, ou use --ponto-idx.")
+        args.ponto_idx = alvos[0]
+        print(f"\n      SMARTS '{args.ponto_smarts}' -> átomo {alvos[0]}")
+
+    if args.ponto_idx is not None:
+        i = args.ponto_idx
+        if not (0 <= i < mol.GetNumAtoms()):
+            raise SystemExit(f"índice {i} fora de 0..{mol.GetNumAtoms()-1}")
+        a = mol.GetAtomWithIdx(i)
+        if a.GetTotalNumHs() < 1:
+            raise SystemExit(
+                f"o átomo {i} ({a.GetSymbol()}) não tem H para ceder ao linker")
+        pos = mol.GetConformer().GetPositions()
+        vz = [n.GetIdx() for n in a.GetNeighbors()]
+        if not vz:
+            raise SystemExit(f"o átomo {i} não tem vizinho: direção indefinida")
+        # A definição química de vetor de saída: a direção da ligação que o
+        # linker vai substituir, do átomo pesado vizinho para o ponto de
+        # conjugação. É mais precisa que (centroide exposto - centroide
+        # enterrado), que é uma média de toda a molécula.
+        v = pos[i] - pos[vz[0]]
+        v = v / float(np.linalg.norm(v))
+        nb = (np.linalg.norm(pos[:, None, :] - rec[None, :, :], axis=2)
+              <= 6.0).sum(axis=1)
+        ev = {"atom_idx": i, "atom_symbol": a.GetSymbol(),
+              "atom_n_hs": a.GetTotalNumHs(),
+              "exit_point": [round(float(x), 3) for x in pos[i]],
+              "exit_direction": [round(float(x), 4) for x in v],
+              "dist_ao_nucleo_A": 0.0,
+              "vizinhos_proteicos": int(nb[i]),
+              "n_atomos_enterrados": 0, "n_atomos_expostos": 0,
+              "burial_min_max": [int(nb.min()), int(nb.max())],
+              "excluidos_por_farmacoforo": [],
+              "origem": f"escolha explícita --ponto-idx {i}; direção = vetor "
+                        f"da ligação {a.GetSymbol()}{i} <- vizinho {vz[0]}"}
+        print(f"\n[2/5] vetor de saída (ESCOLHA EXPLÍCITA)")
+        print(f"      {ev['origem']}")
+    else:
+        ev = exit_vector_do_recrutador(mol, rec, burial=args.burial,
+                                       mol_ref=None)
+        print(f"\n[2/5] vetor de saída (heurística do WP1)")
     print(f"      átomo {ev['atom_idx']} ({ev['atom_symbol']},"
-          f" {ev['atom_n_hs']} H), {ev['dist_ao_nucleo_A']} Å do núcleo")
+          f" {ev['atom_n_hs']} H), {ev['vizinhos_proteicos']} vizinhos proteicos")
     exc = ev.get("excluidos_por_farmacoforo") or []
     if exc:
         print(f"      {len(exc)} átomo(s) excluído(s) por farmacóforo:")
