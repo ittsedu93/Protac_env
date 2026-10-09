@@ -34,6 +34,19 @@
 # ser culpa de outra pessoa, e nesse caso paramos à toa. Parar à toa custa um
 # relançamento; não parar custa o disco da máquina do laboratório.
 #
+# Esse cálculo deixa de valer quando o relançamento é CARO. O PRosettaC roda
+# ~8 dias: ali "parar à toa" não custa um relançamento, custa oito dias, e um
+# colega que escreva 110 GB no meio da semana mataria uma corrida que não
+# consumiu nada. Para esse caso existe `--consumo-so-du`: o teto de consumo
+# passa a ser julgado SÓ pelo du, que atribui o consumo a nós com precisão, e
+# o `df` continua guardando o `--piso-gb` a cada 2 s — ou seja, a máquina do
+# laboratório segue protegida, e quem é cobrado pelo teto somos nós.
+# Com ele, convém afrouxar `--intervalo-du`: um `du` de 30 s numa árvore de
+# centenas de milhares de arquivos martela o I/O da máquina por dias. A
+# granularidade que se perde é pequena quando a etapa escreve devagar — o
+# PRosettaC escreveu 90 GB em 8 dias, ~0,5 GB/h, então 15 min de intervalo
+# valem ~0,1 GB de ultrapassagem.
+#
 # O QUE ESTA TRAVA GARANTE, E O QUE NÃO GARANTE
 # ---------------------------------------------
 # Ela NÃO é um limite absoluto do kernel. Ela mede a cada poucos segundos e
@@ -65,6 +78,7 @@ ONDE=""
 INTERVALO=2
 INTERVALO_DU=30
 MAX_ARQ_GB=20
+CONSUMO_SO_DU=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --max-consumo-gb) MAX_GB="$2"; shift 2;;
@@ -74,6 +88,7 @@ while [[ $# -gt 0 ]]; do
     --intervalo)      INTERVALO="$2"; shift 2;;
     --intervalo-du)   INTERVALO_DU="$2"; shift 2;;
     --max-arquivo-gb) MAX_ARQ_GB="$2"; shift 2;;
+    --consumo-so-du)  CONSUMO_SO_DU=1; shift;;
     --) shift; break;;
     *) echo "opção desconhecida: $1"; exit 1;;
   esac
@@ -112,6 +127,9 @@ echo "  deixando livre, no pior caso .......... $(gb "$PISO_DERIVADO_MB") GB"
 echo "  e eu mato antes disso se o livre tocar  ${PISO_GB} GB"
 echo "  nenhum arquivo individual passa de .... ${MAX_ARQ_GB} GB (limite de kernel)"
 echo "  medindo: df a cada ${INTERVALO}s, du a cada ${INTERVALO_DU}s"
+if [[ "$CONSUMO_SO_DU" == "1" ]]; then
+  echo "  teto de consumo julgado SÓ pelo du (o df guarda apenas o piso)"
+fi
 echo "=============================================================="
 if [[ "$MAX_MB" -ge $(( L0 - PISO_MB )) ]]; then
   echo "*** O teto de ${MAX_GB} GB não cabe: com $(gb "$L0") GB livres e piso"
@@ -136,7 +154,7 @@ while kill -0 "$PG" 2>/dev/null; do
   if [[ -n "$L" ]]; then
     if [[ "$L" -le "$PISO_MB" ]]; then
       matou="piso absoluto: $(gb "$L") GB livres (piso ${PISO_GB} GB)"
-    elif [[ $(( L0 - L )) -ge "$MAX_MB" ]]; then
+    elif [[ "$CONSUMO_SO_DU" != "1" && $(( L0 - L )) -ge "$MAX_MB" ]]; then
       # Pode ser escrita de outra pessoa. Paramos de qualquer forma: parar à
       # toa custa um relançamento, não parar custa o disco do laboratório.
       matou="o livre caiu $(gb $(( L0 - L ))) GB, teto de consumo ${MAX_GB} GB"

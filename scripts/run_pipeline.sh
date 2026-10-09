@@ -320,6 +320,20 @@ if [[ -f "$RJ" ]]; then
   : "${E3_EXIT_DIRECTION:=$(ler_json exit_direction)}"
   : "${E3_RECEPTOR_PDB:=$(ler_json receptor_pdb)}"
   log "\nrecrutador: $E3_NAME | exit point [$E3_EXIT_POINT] | direção [$E3_EXIT_DIRECTION]"
+
+  # `:=` substitui quando a variável está VAZIA, não só quando não existe. É
+  # exatamente assim que um valor em branco na config cai de volta neste JSON —
+  # e o JSON pode estar velho. O recrutador da VHL JÁ foi trocado à mão depois
+  # de o WP1 ter escolhido um ligante de CRBN por engano, então a discordância
+  # entre os dois é esperada e correta; o que não pode é ela ser silenciosa.
+  DO_JSON="$(ler_json recruiter_sdf)"
+  if [[ -n "$DO_JSON" && "$E3_RECRUITER_SDF" != "$DO_JSON" ]]; then
+    log "  [atenção] a config SOBREPÕE a escolha do WP1:"
+    log "            config: $(basename "$E3_RECRUITER_SDF")"
+    log "            wp1_recruiter.json: $(basename "$DO_JSON")"
+    log "            Vale a config. Se não era o que você queria, apague a"
+    log "            linha E3_RECRUITER_SDF de $CONF e relance a fase 4."
+  fi
 fi
 
 # ===========================================================================
