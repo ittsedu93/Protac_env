@@ -274,11 +274,37 @@ secao "WP1 — o recrutador recruta a E3 que dizemos?"
 # escolhe o recrutador por SCORE DE DOCKING e enterramento, e nenhuma das duas
 # medidas sabe que E3 a molécula de fato recruta. O recrutador escolhido para o
 # "track da VHL" era um análogo de talidomida — ligante canônico de CRBN.
-RECR=$(find "${WP1_PREP:-}" "${PIPELINE_OUT:-}" -maxdepth 4 \
-            -name "recruiter_*_H.sdf" -o -name "recruiter_*.sdf" 2>/dev/null \
-         | grep -v "_H.sdf" | sort | head -1)
+# PELO QUE A CONFIG DECLARA, e não por `find`. A primeira versão disto
+# procurava `recruiter_*.sdf` em dois diretórios e pegava o PRIMEIRO EM ORDEM
+# ALFABÉTICA — então, depois de trocar o recrutador, ela continuou achando o
+# `recruiter_VHL_ligand_087.sdf` obsoleto que a etapa de localização havia
+# copiado para dentro do pipeline_vhl, e bloqueou por um arquivo que o pipeline
+# não usa mais.
+#
+# É o MESMO defeito que o status.sh tinha (escolher por posição numa lista em
+# vez de pela fonte autoritativa), e eu o reintroduzi aqui poucos commits
+# depois de consertá-lo lá. A fonte autoritativa é E3_RECRUITER_SDF: é esse o
+# arquivo que o WP2 e o WP3 vão ler.
+#
+# E a config VAZIA é bloqueio por si: com ela vazia o driver cai no
+# wp1_recruiter.json, e foi assim que um ligante de CRBN virou recrutador de
+# VHL por sete dias.
+RECR="${E3_RECRUITER_SDF:-}"
+if [[ -n "$RECR" ]]; then
+  if [[ -s "$RECR" ]]; then
+    ok "E3_RECRUITER_SDF declarado na config: $(basename "$RECR")"
+  else
+    bloq "E3_RECRUITER_SDF aponta para arquivo inexistente: $RECR"
+    RECR=""
+  fi
+else
+  bloq "E3_RECRUITER_SDF está VAZIO na config"
+  printf '             Com ele vazio o driver lê o recrutador do\n'
+  printf '             wp1_recruiter.json, e foi assim que um ligante de CRBN\n'
+  printf '             virou recrutador de VHL por sete dias.\n'
+fi
 if [[ -z "${RECR:-}" ]]; then
-  aviso "não achei o SDF do recrutador para checar o quimiotipo"
+  : # já bloqueado acima
 elif conda run -n "${ENV_MDTOOLS:-mdtools}" python "$AQUI/checar_recrutador.py" \
        --e3 "${WP1_E3_LIST:-VHL}" --sdf "$RECR" >/tmp/.recr.$$ 2>&1; then
   ok "recrutador $(basename "$RECR") tem assinatura de ${WP1_E3_LIST:-VHL}"
