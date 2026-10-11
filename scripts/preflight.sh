@@ -340,6 +340,28 @@ fi
 echo "  nenhum bloqueio; $avisos aviso(s) — são fases que ainda vão produzir"
 echo "  o que falta, na ordem certa."
 echo
-echo "  Para lançar, destacado do terminal:"
-echo "    setsid env PIPELINE_CONF=$CONF bash $AQUI/run_pipeline.sh \\"
-echo "        --from 4 > ~/pipeline_vhl.log 2>&1 & disown -a"
+# DOIS lançamentos, e não um. A sugestão antiga era um `--from 4` solto, sem
+# teto de disco e sem `--to` — ou seja, a linha que este preflight imprimia
+# para ser copiada entrava no PRosettaC (dias, ~90 GB) sem limite nenhum, numa
+# workstation compartilhada. Imprimir um comando é recomendá-lo.
+echo "  Lançar as fases 5-7 (minutos, mais ~30 min da 6a), com teto de disco:"
+echo "    export PIPELINE_CONF=$CONF"
+echo "    nohup bash $AQUI/rodar_com_teto_de_disco.sh \\"
+echo "      --max-consumo-gb 10 --piso-gb 30 --max-arquivo-gb 2 \\"
+echo "      --medir $WORK \\"
+echo "      -- bash $AQUI/run_pipeline.sh --from 5 --to 7 \\"
+echo "      > ~/fases_5a7.log 2>&1 &"
+echo
+echo "  Depois de olhar o veredicto da 6b, a fase 9 em lançamento SEPARADO"
+echo "  (PRosettaC, ~8 dias, ~90 GB):"
+echo "    nohup bash $AQUI/rodar_com_teto_de_disco.sh \\"
+echo "      --max-consumo-gb 110 --piso-gb 40 --max-arquivo-gb 5 \\"
+echo "      --medir $WORK \\"
+echo "      --consumo-so-du --intervalo-du 900 --ao-matar 'scancel -u \$USER' \\"
+echo "      -- bash $AQUI/run_pipeline.sh --only 9 \\"
+echo "      > ~/fase9.log 2>&1 &"
+echo
+echo "  Separados de propósito: sem o --to, o driver entra na fase 9 dentro do"
+echo "  mesmo processo, debaixo do teto pequeno, e a trava a mata no primeiro"
+echo "  minuto. E os tetos são diferentes porque as etapas custam coisas"
+echo "  diferentes — 201 MB contra 90 GB."
