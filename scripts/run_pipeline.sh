@@ -119,6 +119,42 @@ print(r[i]['candidate_id'] if r else '')")
   return 0
 }
 
+# O ranking das warheads, resolvido numa função e não dentro da fase 6.
+#
+# Ele estava resolvido LÁ DENTRO, e a fase 7 o usava com um default:
+#
+#   --warhead-ranking "${RANKING:-$PIPELINE_OUT/warhead_ranking.csv}"
+#
+# Com `--from 6a`, a fase 6 não roda, RANKING nunca é atribuída, e a fase 7 cai
+# num caminho que não existe:
+#
+#   FileNotFoundError: .../pipeline_vhl/warhead_ranking.csv
+#
+# Uma variável definida dentro de um `if quer N` e lida por uma fase posterior
+# é uma falha à espera do primeiro `--from` que pule aquele N. Aqui ela é
+# resolvida por quem precisa dela, na hora em que precisa.
+#
+# A fase 3 pode ter sido rodada à mão antes do pipeline existir, gravando o
+# ranking no diretório do docking em vez de $PIPELINE_OUT. Procura nos dois, e
+# se não achar em nenhum, refaz a análise (custa segundos).
+achar_ranking_warheads() {  # define RANKING
+  [[ -n "${RANKING:-}" && -f "${RANKING:-}" ]] && return 0
+  RANKING="$PIPELINE_OUT/warhead_ranking.csv"
+  [[ -f "$RANKING" ]] && return 0
+  local alt="$DOCKING_DIR/docking/warhead_ranking.csv"
+  if [[ -f "$alt" ]]; then
+    log "  ranking das warheads encontrado em $alt"
+    RANKING="$alt"
+    return 0
+  fi
+  log "  ranking das warheads ausente: refazendo a análise da fase 3"
+  run_in "$ENV_MDTOOLS" python "$REPO/scripts/analyze_warhead_docking.py" \
+      --docking "$DOCKING_DIR/docking" \
+      --site "$DOCKING_DIR/pcsk9_site.json" \
+      --warheads-csv "$WARHEADS_DIR/pcsk9_warheads.csv" \
+      --sd-max "$ANALISE_SD_MAX" --out "$RANKING"
+}
+
 exige() {  # exige <variável> <mensagem>
   local nome="$1"; local val="${!1:-}"
   if [[ -z "$val" ]]; then
@@ -369,24 +405,7 @@ fi
 if quer 6; then
   head_ 6 "WP3 — montar PROTACs e emitir jobs"
 
-  # A fase 3 pode ter sido rodada à mão antes do pipeline existir, gravando o
-  # ranking no diretório do docking em vez de $PIPELINE_OUT. Procura nos dois,
-  # e se não achar em nenhum, refaz a análise (custa segundos).
-  RANKING="$PIPELINE_OUT/warhead_ranking.csv"
-  if [[ ! -f "$RANKING" ]]; then
-    ALT="$DOCKING_DIR/docking/warhead_ranking.csv"
-    if [[ -f "$ALT" ]]; then
-      log "  ranking encontrado em $ALT"
-      RANKING="$ALT"
-    else
-      log "  ranking ausente: refazendo a análise da fase 3"
-      run_in "$ENV_MDTOOLS" python "$REPO/scripts/analyze_warhead_docking.py" \
-          --docking "$DOCKING_DIR/docking" \
-          --site "$DOCKING_DIR/pcsk9_site.json" \
-          --warheads-csv "$WARHEADS_DIR/pcsk9_warheads.csv" \
-          --sd-max "$ANALISE_SD_MAX" --out "$RANKING"
-    fi
-  fi
+  achar_ranking_warheads
   run_in "$ENV_MDTOOLS" python "$REPO/scripts/wp3_assemble_protacs.py" \
       --subcomplexes "$PIPELINE_OUT/wp2/subcomplexes" \
       --warhead-ranking "$RANKING" \
@@ -504,12 +523,13 @@ fi
 # ===========================================================================
 if quer 7; then
   head_ 7 "Ranquear os PROTACs (segundos)"
+  achar_ranking_warheads
   # O --span ELIMINA quem não alcança, em vez de dar nota baixa: um PROTAC que
   # não vence o vão não é pior, é impossível. Sem o --span o rank_protacs avisa,
   # alto, que não está verificando isso.
   run_in "$ENV_MDTOOLS" python "$REPO/scripts/rank_protacs.py" \
       --protacs "$PIPELINE_OUT/wp3/protac_candidates.csv" \
-      --warhead-ranking "${RANKING:-$PIPELINE_OUT/warhead_ranking.csv}" \
+      --warhead-ranking "$RANKING" \
       --subcomplexes "$PIPELINE_OUT/wp2/subcomplexes_manifest.json" \
       ${SPAN_MIN:+--span "$PIPELINE_OUT/wp3/linker_span.csv" --span-min "$SPAN_MIN"} \
       --out "$PIPELINE_OUT/protac_ranking.csv"
