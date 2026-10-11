@@ -202,12 +202,52 @@ tem_arquivo "${PIPELINE_OUT:-}/wp2/subcomplexes_manifest.json" \
 
 secao "fase 8-9 — MD e ternário"
 tem_exe "${GMX_EXE:-/usr/local/gromacs/bin/gmx}" "GROMACS para a MD"
-if [[ "${PROSETTAC_FULL:-False}" == "True" ]]; then
-  ok "PROSETTAC_FULL=True (amostragem completa)"
+
+# O `Full` que vale é o do prosetta_config.txt do candidato, porque é o arquivo
+# que o PRosettaC lê. A variável da config só governa o que a fase 6 ESCREVE
+# nesse arquivo, e as duas podem divergir: trocar o Full à mão no job (para uma
+# corrida-piloto, por exemplo) não mexe na variável. Conferir só a variável
+# seria dizer "amostragem completa" sobre uma corrida reduzida — a mesma
+# divergência config-x-arquivo que nesta sessão já custou a medição da fase 6a
+# e um bloqueio do acpype por um caminho que a MD nunca usaria.
+FULL_ARQ=""
+if [[ -n "${PIPELINE_OUT:-}" && -s "$PIPELINE_OUT/protac_ranking.csv" ]]; then
+  CAND_PF="$(python3 -c "
+import csv
+r=list(csv.DictReader(open('$PIPELINE_OUT/protac_ranking.csv')))
+i=min(max(int('${MD_RANK:-1}')-1,0),len(r)-1) if r else 0
+print(r[i]['candidate_id'] if r else '')" 2>/dev/null)"
+  if [[ -n "$CAND_PF" ]]; then
+    # shellcheck disable=SC1090
+    source "$AQUI/achar_job.sh"
+    CFG_PF="$(achar_job_dir "$PIPELINE_OUT" "$CAND_PF" 2>/dev/null)/prosetta_config.txt"
+    [[ -s "$CFG_PF" ]] && FULL_ARQ="$(awk -F': ' '/^Full:/{print $2; exit}' "$CFG_PF")"
+  fi
+fi
+
+if [[ -n "$FULL_ARQ" ]]; then
+  ONDE="no job de $CAND_PF"
 else
-  bloq "PROSETTAC_FULL='${PROSETTAC_FULL:-}' — com False são 500 soluções"
-  printf '             globais em vez de 1000 e 10 refinamentos em vez de 50.\n'
-  printf '             Concluir ausência de geometria com isso é concluir errado.\n'
+  FULL_ARQ="${PROSETTAC_FULL:-}"
+  ONDE="na config (o job ainda não existe)"
+fi
+
+if [[ "$FULL_ARQ" == "True" ]]; then
+  ok "Full=True $ONDE (amostragem completa)"
+  if [[ "${PROSETTAC_FULL:-}" != "True" ]]; then
+    aviso "a config diz PROSETTAC_FULL='${PROSETTAC_FULL:-}' e o job diz True"
+    printf '             — vale o job. A fase 6, se rodar de novo, reescreve.\n'
+  fi
+elif [[ "${PROSETTAC_PILOTO:-0}" == "1" ]]; then
+  aviso "Full=False $ONDE — PILOTO declarado (PROSETTAC_PILOTO=1)"
+  printf '             500 soluções globais em vez de 1000 e 10 refinamentos em\n'
+  printf '             vez de 50: serve para MEDIR custo e tempo deste par, NÃO\n'
+  printf '             para concluir que não existe geometria ternária.\n'
+else
+  bloq "Full='$FULL_ARQ' $ONDE — com False são 500 soluções globais em vez"
+  printf '             de 1000 e 10 refinamentos em vez de 50. Concluir ausência\n'
+  printf '             de geometria com isso é concluir errado. Se for piloto de\n'
+  printf '             propósito, declare:  PROSETTAC_PILOTO=1 bash ...\n'
 fi
 
 secao "fase 10 — MD do ternário (nível iii)"
