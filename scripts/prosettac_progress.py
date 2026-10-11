@@ -37,6 +37,54 @@ from pathlib import Path
 SOLUCOES_POR_TRANSFORMADA = 34.8   # 1184 / 34, medido no track da CRBN
 TETO_DO_PROSETTAC = 1000           # `Global` com Full: True, no main.py dele
 
+# Os dois números acima valem para `Full: True`. No main.py do PRosettaC o Full
+# governa DOIS parâmetros: Global (quantas transformadas o PatchDock guarda) e
+# Local (quantos refinamentos o Rosetta faz por transformada).
+#
+#   Full: True   -> Global = 1000,  Local = 50
+#   Full: False  -> Global =  500,  Local = 10
+#
+# Usar 1000 e 34,8 numa corrida com `Full: False` erraria o alvo por um fator
+# de ~10 e o "falta" junto com ele — ou seja, o contador de progresso mentiria
+# exatamente na corrida-piloto, que existe para medir custo. A razão de
+# soluções por transformada é proporcional a Local, então ela é DERIVADA, não
+# medida, e o relatório diz isso.
+GLOBAL_POR_FULL = {True: 1000, False: 500}
+LOCAL_POR_FULL = {True: 50, False: 10}
+
+
+def ler_full(d: Path) -> bool | None:
+    """O `Full:` do prosetta_config.txt desta corrida. None se não houver."""
+    for cfg in sorted(d.glob("prosetta_config*.txt")):
+        for linha in cfg.read_text(errors="ignore").splitlines():
+            if linha.startswith("Full:"):
+                return linha.split(":", 1)[1].strip() == "True"
+    return None
+
+
+def parametros_do_full(d: Path):
+    """(full, teto, razao, origem_da_razao) — o que o alvo precisa saber."""
+    full = ler_full(d)
+    if full is None:          # sem config legível: fica no caso completo
+        return None, TETO_DO_PROSETTAC, SOLUCOES_POR_TRANSFORMADA, \
+            "a razão medida na CRBN"
+    teto = GLOBAL_POR_FULL[full]
+    if full:
+        return True, teto, SOLUCOES_POR_TRANSFORMADA, "a razão medida na CRBN"
+    razao = SOLUCOES_POR_TRANSFORMADA * LOCAL_POR_FULL[False] / LOCAL_POR_FULL[True]
+    return False, teto, razao, (
+        f"a razão da CRBN escalada por Local 10/50 = {razao:.1f}, DERIVADA")
+
+
+def calcular_alvo(tr, teto, razao, alvo_cli):
+    """(alvo, suposto). Uma fórmula, um lugar: o relatório e a linha única
+    divergirem seria pior que não ter a linha única."""
+    if alvo_cli:
+        return alvo_cli, False
+    if not tr:
+        return None, False
+    return int(min(tr, teto) * razao), True
+
 
 def transformadas(log: Path) -> int | None:
     if not log.exists():
@@ -145,6 +193,27 @@ def taxa_da_serie(pontos):
     return longa, curta
 
 
+def emitidos_do_log(d: Path) -> int:
+    """Quantos jobs a etapa atual emitiu, pelo `jobs: [...]` do log.txt."""
+    log = d / "log.txt"
+    txt = log.read_text(errors="ignore") if log.exists() else ""
+    listas = re.findall(r"jobs: \[(.*?)\]", txt)
+    if not listas:
+        return 0
+    return len([x for x in listas[-1].split(",") if x.strip()])
+
+
+def contar_fila():
+    """(restantes, tem_fila). Uma implementação do `squeue`, não duas."""
+    try:
+        saida = subprocess.run(["squeue", "-h", "-u", os.environ.get("USER", "")],
+                               capture_output=True, text=True, timeout=20)
+        return len([l for l in saida.stdout.splitlines() if l.strip()]), \
+            saida.returncode == 0
+    except Exception:
+        return 0, False
+
+
 def progresso_pela_fila(d: Path):
     """Progresso da etapa atual pela FILA, não pelos arquivos.
 
@@ -175,18 +244,8 @@ def progresso_pela_fila(d: Path):
                  seguidas apagava a leitura antiga e destruía a base de
                  comparação justamente de quem estava conferindo com atenção
     """
-    emitidos = 0
-    txt = (d / "log.txt").read_text(errors="ignore") if (d / "log.txt").exists() else ""
-    listas = re.findall(r"jobs: \[(.*?)\]", txt)
-    if listas:
-        emitidos = len([x for x in listas[-1].split(",") if x.strip()])
-    try:
-        saida = subprocess.run(["squeue", "-h", "-u", os.environ.get("USER", "")],
-                               capture_output=True, text=True, timeout=20)
-        restantes = len([l for l in saida.stdout.splitlines() if l.strip()])
-        tem_fila = saida.returncode == 0
-    except Exception:
-        restantes, tem_fila = 0, False
+    emitidos = emitidos_do_log(d)
+    restantes, tem_fila = contar_fila()
 
     if not tem_fila:
         print("\n  (sem `squeue` nesta máquina — acompanhe por "
@@ -345,6 +404,83 @@ def humano(seg: float) -> str:
     return f"{h}h {m}min" if h else f"{m}min"
 
 
+# As etapas, em nome curto, para caber numa linha. A ORDEM é a do ETAPAS.
+CURTO = {
+    "preparando receptores (clean + relax)": "prep",
+    "amostrando a distância entre as âncoras": "SampleDist",
+    "docking global com a restrição": "PatchDock",
+    "refinamento local do Rosetta": "docking local",
+    "conformações do linker": "conformações",
+    "agrupamento final": "agrupamento",
+    "TERMINADO": "TERMINADO",
+}
+
+
+def uma_linha(d: Path, alvo_cli):
+    """Uma linha por chamada, para um log que se acompanha com `tail -f`.
+
+    O relatório completo responde "está ok?" uma vez. Uma SÉRIE de linhas
+    responde "está andando?", que é outra pergunta e a que importa durante
+    dias. As fórmulas (alvo, taxa, falta) são as mesmas do relatório, pelas
+    mesmas funções: duas contas para o mesmo número divergiriam, e divergência
+    de contador é pior que não ter contador.
+    """
+    agora = time.strftime("%d/%m %H:%M")
+    if (d / "Results").is_dir():
+        print(f"{agora} | TERMINOU — Results/ existe")
+        return
+
+    full, teto, razao, _origem = parametros_do_full(d)
+    tr = transformadas(d / "run_prosettac.log")
+    etapa, passou = etapa_atual(d / "log.txt")
+    campos = [agora]
+    campos.append(CURTO.get(etapa or "", etapa or "etapa: ?"))
+    campos.append("Full:" + ("T" if full else "F" if full is False else "?"))
+    campos.append(f"transf:{tr if tr is not None else '?'}")
+
+    pd_dir = d / "Patchdock_Results"
+    arquivos = sorted(pd_dir.glob("*_docking_????.pdb"),
+                      key=lambda p: p.stat().st_mtime) if pd_dir.is_dir() else []
+    n = len(arquivos)
+
+    if passou:
+        # Depois do docking local, quem mede é a fila: cada etapa escreve
+        # arquivos diferentes, a fila vale para todas.
+        emitidos = emitidos_do_log(d)
+        restantes, tem_fila = contar_fila()
+        if not tem_fila:
+            campos.append("fila: sem squeue")
+        elif emitidos:
+            feitos = max(emitidos - restantes, 0)
+            campos.append(f"jobs:{feitos}/{emitidos} "
+                          f"({100 * feitos / emitidos:.1f}%)")
+            campos.append(f"fila:{restantes}")
+        else:
+            campos.append(f"fila:{restantes}")
+        print(" | ".join(campos))
+        return
+
+    alvo, _suposto = calcular_alvo(tr, teto, razao, alvo_cli)
+    if n < 2:
+        campos.append(f"sol:{n} (pouco para medir taxa)")
+        print(" | ".join(campos))
+        return
+    t0, t1 = arquivos[0].stat().st_mtime, arquivos[-1].stat().st_mtime
+    decorrido = t1 - t0
+    taxa = n / decorrido if decorrido > 0 else 0
+    if alvo:
+        campos.append(f"sol:{n}/{alvo} ({100 * n / alvo:.1f}%)")
+    else:
+        campos.append(f"sol:{n}/? (sem alvo)")
+    if taxa > 0:
+        campos.append(f"{taxa * 60:.1f}/min")
+        if alvo:
+            campos.append(f"falta ~{humano(max(alvo - n, 0) / taxa)}")
+    else:
+        campos.append("taxa: ainda não")
+    print(" | ".join(campos))
+
+
 def main():
     ap = argparse.ArgumentParser(
         description=__doc__,
@@ -356,11 +492,21 @@ def main():
                     / "prosettac")
     ap.add_argument("--alvo", type=int,
                     help="quantas soluções esperar (sobrescreve a suposição)")
+    ap.add_argument("--uma-linha", action="store_true",
+                    help="uma linha compacta, para anexar a um log de progresso")
     args = ap.parse_args()
 
     d = args.work.expanduser() / args.candidato
     if not d.is_dir():
+        if args.uma_linha:
+            print(f"{time.strftime('%d/%m %H:%M')} | diretório ainda não existe:"
+                  f" {d.name}")
+            return
         raise SystemExit(f"não achei {d}")
+
+    if args.uma_linha:
+        uma_linha(d, args.alvo)
+        return
 
     print(f"candidato: {args.candidato}")
     if (d / "Results").is_dir():
@@ -377,14 +523,22 @@ def main():
     n = len(arquivos)
     n_pd = len(list(pd_dir.iterdir())) if pd_dir.is_dir() else 0
     tr = transformadas(d / "run_prosettac.log")
+    full, teto, razao, origem = parametros_do_full(d)
 
     etapa, passou = etapa_atual(d / "log.txt")
     if etapa:
         print(f"  etapa atual: {etapa}")
+    if full is None:
+        print("  Full: não achei no prosetta_config.txt — contando como True")
+    else:
+        print(f"  Full: {full}  (Global={teto}, "
+              f"Local={LOCAL_POR_FULL[full]})"
+              + ("   <- PILOTO: amostragem reduzida, não serve para concluir"
+                 " ausência de geometria" if not full else ""))
     print(f"  Patchdock_Results: {n_pd} arquivos")
     print(f"  transformadas do PatchDock: {tr if tr is not None else '?'}"
-          + (f"  (o PRosettaC refina as {TETO_DO_PROSETTAC} melhores)"
-             if tr and tr > TETO_DO_PROSETTAC else ""))
+          + (f"  (o PRosettaC refina as {teto} melhores)"
+             if tr and tr > teto else ""))
     print(f"  soluções de docking local escritas: {n}")
 
     # A guarda de "poucas soluções" ficava AQUI, antes do desvio para a fila —
@@ -423,11 +577,7 @@ def main():
           f"última às {time.strftime('%d/%m %H:%M', time.localtime(t1))}")
     print(f"  decorrido: {humano(decorrido)} | taxa: {taxa * 60:.1f} soluções/min")
 
-    alvo = args.alvo
-    suposto = False
-    if alvo is None and tr:
-        alvo = int(min(tr, TETO_DO_PROSETTAC) * SOLUCOES_POR_TRANSFORMADA)
-        suposto = True
+    alvo, suposto = calcular_alvo(tr, teto, razao, args.alvo)
     if not alvo:
         print("\n  sem alvo: passe --alvo para estimar o fim.")
         return
@@ -435,8 +585,8 @@ def main():
     falta = max(alvo - n, 0)
     print()
     print(f"  alvo: ~{alvo} soluções"
-          + ("  (suposição: min(transformadas, 1000) x 34,8 — a razão medida"
-             " na CRBN)" if suposto else ""))
+          + (f"  (suposição: min(transformadas, {teto}) x {razao:.1f} — "
+             f"{origem})" if suposto else ""))
     print(f"  progresso: {100 * n / alvo:.1f}%")
     print(f"  falta: ~{falta} soluções -> ~{humano(falta / taxa)}")
     print(f"  fim estimado: "
