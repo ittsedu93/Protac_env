@@ -28,6 +28,11 @@
 # registro de uma semana de máquina e entra na tese como tentativa descartada,
 # com o motivo. E `mv` dentro do mesmo sistema de arquivos é renomeação —
 # ZERO bytes escritos, o que importa num disco compartilhado.
+#
+# O destino fica FORA de $PIPELINE_OUT. Na primeira versão ficava dentro, e a
+# fase 6a foi medir o vão nos Init0/Init1 arquivados: `_` ordena antes de `w`,
+# então o `sort | head -1` das buscas escolhia o arquivo morto sempre. Rodar
+# este script de novo tira para fora o que ficou dentro.
 # ---------------------------------------------------------------------------
 set -uo pipefail
 
@@ -60,6 +65,16 @@ if [[ -z "${E3_RECRUITER_SDF:-}" ]]; then
 fi
 ATUAL="$(basename "$E3_RECRUITER_SDF")"
 echo "  recrutador atual: $ATUAL"
+
+# FORA de $PIPELINE_OUT, e isto foi aprendido do jeito caro. Na primeira versão
+# o destino era $PIPELINE_OUT/_recrutador_antigo_<data>, dentro da própria
+# saída — e os `find` do pipeline procuram em $PIPELINE_OUT. A fase 6a achou lá
+# os Init0/Init1 do recrutador antigo, disse "preparação já existe — nada a
+# fazer" e mediu o vão sobre eles. Guardar o material morto no mesmo lugar onde
+# o pipeline procura o material vivo não é arquivar.
+BASE_ARQ="${WORK:-$(dirname "$PIPELINE_OUT")}"
+[[ -d "$BASE_ARQ" ]] || { echo "*** não achei onde arquivar: $BASE_ARQ"; exit 1; }
+echo "  arquivo morto vai para: $BASE_ARQ  (fora da saída do pipeline)"
 
 # --- nada se move com o PRosettaC vivo ------------------------------------
 # shellcheck disable=SC1090
@@ -94,6 +109,32 @@ done < <(find "$PIPELINE_OUT" -maxdepth 5 -type f -name prosetta_config.txt \
 [[ "$VELHOS" -gt 3 ]] && echo "      ... e outros $((VELHOS-3)) com o mesmo recrutador velho"
 echo "      total: $VELHOS velhos, $NOVOS já no atual, $SEM sem linha 'Heads:'"
 
+# --- arquivo morto que ficou DENTRO da saída (versão anterior deste script) -
+DENTRO=()
+while IFS= read -r d; do [[ -n "$d" ]] && DENTRO+=("$d")
+done < <(find "$PIPELINE_OUT" -maxdepth 1 -type d -name "_recrutador_antigo_*" \
+              2>/dev/null | sort)
+if [[ ${#DENTRO[@]} -gt 0 ]]; then
+  echo ""
+  echo "  [CONSERTO] ${#DENTRO[@]} pasta(s) de arquivo morto estão DENTRO de"
+  echo "             $PIPELINE_OUT, onde os find do pipeline procuram. Elas"
+  echo "             saem para $BASE_ARQ:"
+  for d in "${DENTRO[@]}"; do echo "               $(basename "$d")"; done
+  if [[ "$APLICAR" == "1" ]]; then
+    for d in "${DENTRO[@]}"; do
+      mv "$d" "$BASE_ARQ/" && echo "             movido para fora: $(basename "$d")" \
+        || { echo "*** falhou mover $d"; exit 1; }
+    done
+  fi
+fi
+
+if [[ "$VELHOS" -eq 0 && "$NOVOS" -gt 0 ]]; then
+  echo ""
+  echo "  Todos os jobs já referenciam o recrutador ATUAL. Não há o que"
+  echo "  arquivar — e eu não mexo numa saída que já é a boa."
+  exit 0
+fi
+
 # --- o que sai da frente --------------------------------------------------
 ALVOS=(
   "$PIPELINE_OUT/wp2"
@@ -107,7 +148,7 @@ ALVOS=(
 # a escolha do recrutador não dependem do SDF que foi trocado.
 for f in 5 6 6a 6b 7 8 9 10; do ALVOS+=("$PIPELINE_OUT/.done_$f"); done
 
-DESTINO="$PIPELINE_OUT/_recrutador_antigo_$(date +%Y%m%d_%H%M%S)"
+DESTINO="$BASE_ARQ/_recrutador_antigo_$(date +%Y%m%d_%H%M%S)"
 echo ""
 echo "  destino: $DESTINO"
 echo ""
@@ -126,13 +167,6 @@ for a in "${ALVOS[@]}"; do
 done
 if [[ ${#PRESENTES[@]} -eq 0 ]]; then
   echo "      (nada presente — já está limpo)"
-  exit 0
-fi
-
-if [[ "$VELHOS" -eq 0 && "$NOVOS" -gt 0 ]]; then
-  echo ""
-  echo "  Todos os jobs já referenciam o recrutador ATUAL. Não há o que"
-  echo "  arquivar — e eu não mexo numa saída que já é a boa."
   exit 0
 fi
 

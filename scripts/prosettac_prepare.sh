@@ -37,6 +37,8 @@ CONF="${PIPELINE_CONF:-$AQUI/../config/pipeline.conf}"
 # A CRBN foi abandonada; a guarda recusa rodar nela sem PROTAC_TRACK_OK=1.
 # shellcheck disable=SC1090
 source "$(dirname "$CONF")/guarda_de_track.sh"
+# shellcheck disable=SC1090
+source "$AQUI/achar_job.sh"
 
 OUT="${_OUT_ENV:-${PIPELINE_OUT:-$HOME/PRosettaC_runs/vhl_crbn_pcsk9_protac/pipeline}}"
 PROSETTAC="${_PROS_ENV:-${PROSETTAC_DIR:-/mnt/hd2tb/Documentos/PRosettaC}}"
@@ -49,10 +51,7 @@ echo "=============================================================="
 echo "Preparação do PRosettaC (só Init0/Init1) — $CAND"
 echo "=============================================================="
 
-DIR=""
-while IFS= read -r achado; do DIR="$(dirname "$achado")"; break
-done < <(find "$OUT" -maxdepth 5 -type f -name "$CFG_NOME" -path "*/$CAND/*" \
-              2>/dev/null | sort)
+DIR="$(achar_job_dir "$OUT" "$CAND")"
 [[ -n "$DIR" ]] || { echo "não achei $CFG_NOME para $CAND em $OUT"; exit 1; }
 cd "$DIR" || exit 1
 echo "  diretório: $DIR"

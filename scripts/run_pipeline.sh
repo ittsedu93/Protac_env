@@ -53,6 +53,10 @@ export PIPELINE_CONF="$CONF"
 # A CRBN foi abandonada; a guarda recusa rodar nela sem PROTAC_TRACK_OK=1.
 # shellcheck disable=SC1090
 source "$(dirname "$CONF")/guarda_de_track.sh"
+# A busca do diretório de job, uma vez só. Ela ignora o arquivo morto, e
+# foi por não ignorar que a fase 6a mediu os Init do recrutador antigo.
+# shellcheck disable=SC1090
+source "$(dirname "$0")/achar_job.sh"
 
 OBABEL_EXE="${OBABEL_EXE:-/home/soberano/miniconda3/envs/obabel_env/bin/obabel}"
 
@@ -107,10 +111,7 @@ r=list(csv.DictReader(open('$rankcsv')))
 i=min(max(int('$rank')-1,0),len(r)-1) if r else 0
 print(r[i]['candidate_id'] if r else '')")
   [[ -n "$CAND" ]] || { log "*** ranking vazio"; return 1; }
-  DIRC=$(dirname "$(find "$PIPELINE_OUT" -maxdepth 5 -type f \
-                         -name "prosetta_config.txt" -path "*/$CAND/*" \
-                         2>/dev/null | sort | head -1)" 2>/dev/null)
-  [[ "$DIRC" == "." ]] && DIRC=""
+  DIRC="$(achar_job_dir "$PIPELINE_OUT" "$CAND")" || DIRC=""
   if [[ -z "$DIRC" ]]; then
     log "*** não achei o diretório do job de $CAND — a fase 6 emite os configs"
     return 1

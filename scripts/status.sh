@@ -18,6 +18,8 @@
 set -uo pipefail
 
 AQUI="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck disable=SC1090
+source "$AQUI/achar_job.sh"
 # PIPELINE_CONF manda. Quatro scripts deste repositório fixavam
 # `config/pipeline.conf` — a config da CRBN — e ignoravam a variável, então nem
 # passá-la ajudava: o comando rodava no track abandonado devolvendo números com
@@ -168,19 +170,18 @@ r=list(csv.DictReader(open('$OUT/protac_ranking.csv')))
 i=min(max(int('${MD_RANK:-1}')-1,0),len(r)-1) if r else 0
 print(r[i]['candidate_id'] if r else '')" 2>/dev/null)
   if [[ -n "${cand:-}" ]]; then
-    DIRC=$(dirname "$(find "$OUT" -maxdepth 5 -type f -name "prosetta_config.txt" \
-             -path "*/$cand/*" 2>/dev/null | sort | head -1)" 2>/dev/null)
-    [[ "$DIRC" == "." ]] && DIRC=""
+    DIRC="$(achar_job_dir "$OUT" "$cand")" || DIRC=""
     [[ -n "$DIRC" ]] && FONTE="ranking, rank ${MD_RANK:-1}"
   fi
 fi
 if [[ -z "$DIRC" ]]; then
   ultimo=$(find "$OUT" -maxdepth 5 -type f -name "log.txt" -path "*/prosettac/*" \
+             "${ARQUIVO_MORTO_FIND[@]}" \
              -printf '%T@ %p\n' 2>/dev/null | sort -rn | head -1 | cut -d' ' -f2-)
   [[ -n "${ultimo:-}" ]] && { DIRC=$(dirname "$ultimo"); FONTE="log.txt mais recente"; }
 fi
 if [[ -n "$DIRC" ]]; then
-  n_cfg=$(find "$OUT" -maxdepth 5 -type f -name "prosetta_config.txt" 2>/dev/null | wc -l)
+  n_cfg=$(achar_job_cfg "$OUT" | wc -l)
   echo -e "\nTERNÁRIO — PRosettaC ($(basename "$DIRC")):"
   echo "  candidato identificado por: $FONTE"
   [[ "$n_cfg" -gt 1 ]] && \

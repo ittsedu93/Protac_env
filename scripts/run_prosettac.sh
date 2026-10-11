@@ -43,6 +43,8 @@ CONF="${PIPELINE_CONF:-$AQUI/../config/pipeline.conf}"
 # A CRBN foi abandonada; a guarda recusa rodar nela sem PROTAC_TRACK_OK=1.
 # shellcheck disable=SC1090
 source "$(dirname "$CONF")/guarda_de_track.sh"
+# shellcheck disable=SC1090
+source "$AQUI/achar_job.sh"
 
 OUT="${_OUT_ENV:-${PIPELINE_OUT:-$HOME/PRosettaC_runs/vhl_crbn_pcsk9_protac/pipeline}}"
 PROSETTAC="${_PROS_ENV:-${PROSETTAC_DIR:-/mnt/hd2tb/Documentos/PRosettaC}}"
@@ -55,15 +57,12 @@ echo "PRosettaC — $CAND"
 echo "=============================================================="
 
 # --- 1. achar o diretório do candidato ------------------------------------
-DIR=""
-while IFS= read -r achado; do DIR="$(dirname "$achado")"; break
-done < <(find "$OUT" -maxdepth 5 -type f -name "$CFG_NOME" -path "*/$CAND/*" \
-              2>/dev/null | sort)
+DIR="$(achar_job_dir "$OUT" "$CAND")"
 if [[ -z "$DIR" ]]; then
   echo "não achei $CFG_NOME para $CAND em $OUT"
   echo
   echo "Candidatos com job emitido:"
-  find "$OUT" -maxdepth 5 -type f -name "$CFG_NOME" 2>/dev/null \
+  achar_job_cfg "$OUT" \
     | sed "s|/$CFG_NOME$||" | xargs -r -n1 basename | sort -u \
     | sed 's/^/    /' | head -20
   exit 1
