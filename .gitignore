@@ -1,3 +1,7 @@
 __pycache__/
 *.pyc
 PCSK9_warheads/
+
+# bases baixadas e saidas da revisao (grandes, e reprodutiveis)
+dados/bases/
+resultados/
