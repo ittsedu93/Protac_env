@@ -77,7 +77,11 @@ Também não há `Título Paper`, `Data` nem `Classe do Alvo` em nenhuma delas. 
 # ===========================================================================
 md(r'''
 ---
-## §1 — Caminhos (a única célula para editar)
+## §1 — Entrada
+
+Os arquivos são localizados **pelo nome**, dentro de `PASTA`. Se eles estão na
+raiz do repositório (ao lado de `notebooks/`), não há nada para editar: rode e
+siga. A célula imprime o que encontrou antes de usar.
 ''')
 
 code(r'''
@@ -85,19 +89,11 @@ from pathlib import Path
 
 # ====================  PREENCHA AQUI  ======================================
 
-PASTA = Path(r"dados")          # pasta com os arquivos das bases
+# Pasta com os arquivos das bases. "." = a raiz do repositório.
+# Rodando o notebook de dentro de notebooks/, a raiz é a pasta de cima.
+PASTA = Path("..") if Path("../scripts").is_dir() else Path(".")
 
-TPD_MAIN     = PASTA / "PROTAC_main_table.txt"
-TPD_ACTIVITY = PASTA / "PROTAC_activity.txt"
-PROTACDB_CSV = PASTA / "protacdb_20220210.csv"
-PROTACPEDIA  = PASTA / "protac.xlsx"
-
-# Sua planilha, usada como molde para preservar a formatação.
-# Se não existir, o notebook cria o arquivo do zero com os mesmos cabeçalhos.
-# ESTE ARQUIVO NUNCA É SOBRESCRITO.
-MODELO = PASTA / "RevisãoPROTAC.xlsx"
-
-SAIDA = Path("resultados") / "RevisaoPROTAC_preenchida.xlsx"
+SAIDA = PASTA / "resultados" / "RevisaoPROTAC_preenchida.xlsx"
 
 # Filtro opcional. None = todas as moléculas das três bases (~35 mil linhas).
 # Para restringir, p.ex.: ALVO = "BRD4"   /   ALVO = "AR"
@@ -122,16 +118,57 @@ CORES = {
 
 SAIDA.parent.mkdir(parents=True, exist_ok=True)
 
-faltando = [str(p) for p in (TPD_MAIN, TPD_ACTIVITY, PROTACDB_CSV, PROTACPEDIA)
-            if not p.exists()]
-if faltando:
-    raise FileNotFoundError(
-        "não encontrei:\n  " + "\n  ".join(faltando) +
-        f"\n\nAjuste PASTA (agora: {PASTA.resolve()})"
-    )
-print("arquivos de entrada: ok")
-print(f"modelo: {MODELO if MODELO.exists() else '(não existe — criarei do zero)'}")
-print(f"saída:  {SAIDA}")
+
+def achar(descricao, padroes, excluir=(), obrigatorio=True):
+    """Localiza um arquivo por padrão de nome, sem depender da grafia exata.
+
+    Os nomes variam (espaço em 'Revisão PROTAC.xlsx', data no
+    'protacdb_20220210.csv'), e um caminho fixo falharia por uma letra. Procura
+    em PASTA e nas subpastas, ignora maiúsculas/minúsculas e, quando acha mais
+    de um, fica com o mais recente e avisa.
+    """
+    vistos = {}
+    for padrao in padroes:
+        for caminho in PASTA.rglob("*"):
+            if not caminho.is_file():
+                continue
+            nome = caminho.name.lower()
+            if re.fullmatch(padrao.lower(), nome) and not any(
+                    e.lower() in nome for e in excluir):
+                vistos[caminho.resolve()] = caminho
+    achados = sorted(vistos.values(), key=lambda c: c.stat().st_mtime, reverse=True)
+    if not achados:
+        if obrigatorio:
+            raise FileNotFoundError(
+                f"não encontrei {descricao} em {PASTA.resolve()}\n"
+                f"  procurei por: {', '.join(padroes)}\n"
+                f"  ajuste PASTA, ou atribua o caminho na mão a esta variável."
+            )
+        return None
+    if len(achados) > 1:
+        print(f"  ! vários candidatos a {descricao}; usando o mais recente: "
+              f"{achados[0].name}  (outros: {', '.join(c.name for c in achados[1:])})")
+    return achados[0]
+
+
+import re  # usado por achar()
+
+TPD_MAIN     = achar("TPD-DB tabela principal", [r".*main.?table.*\.txt"])
+TPD_ACTIVITY = achar("TPD-DB atividade",        [r".*activity.*\.txt"])
+PROTACDB_CSV = achar("PROTAC-DB (csv)",         [r".*protacdb.*\.csv", r".*protac.?db.*\.csv"])
+PROTACPEDIA  = achar("PROTACpedia (xlsx)",      [r"protac\.xlsx", r".*protacpedia.*\.xlsx"],
+                     excluir=("revis",))
+# A planilha-molde. Se não aparecer, o notebook cria o arquivo do zero com os
+# mesmos cabeçalhos. ESTE ARQUIVO NUNCA É SOBRESCRITO.
+MODELO = achar("planilha RevisãoPROTAC", [r".*revis.*protac?.*\.xlsx"],
+               obrigatorio=False)
+
+print("entrada encontrada:")
+for rotulo, caminho in [("TPD-DB main", TPD_MAIN), ("TPD-DB activity", TPD_ACTIVITY),
+                        ("PROTAC-DB", PROTACDB_CSV), ("PROTACpedia", PROTACPEDIA)]:
+    print(f"  {rotulo:<16} {caminho}")
+print(f"  {'molde':<16} {MODELO if MODELO else '(nenhum — criarei a planilha do zero)'}")
+print(f"\nsaída:  {SAIDA}")
 print(f"filtro: {ALVO or 'nenhum (todas as moléculas)'}")
 ''')
 
@@ -596,7 +633,7 @@ from openpyxl.styles import Font, PatternFill
 
 LINHA_INICIAL = 4
 
-if MODELO.exists():
+if MODELO is not None and MODELO.exists():
     if SAIDA.resolve() == MODELO.resolve():
         raise ValueError("SAIDA igual ao MODELO — a planilha original não deve "
                          "ser sobrescrita. Troque SAIDA na §1.")
