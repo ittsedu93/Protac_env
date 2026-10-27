@@ -1,14 +1,12 @@
 #!/usr/bin/env python
 """
-Monta notebooks/protac_revisao_parametros.ipynb — a coleta dos parâmetros da
-aba PAPERS nas quatro bases de PROTAC.
+Monta notebooks/protac_revisao_parametros.ipynb.
 
-O notebook é a interface: você preenche UMA célula (o alvo) e roda o resto.
-A lógica toda está em scripts/protac_fontes.py, que é testado em
-tests/test_protac_fontes.py — o notebook não repete nada dela, só chama.
+O notebook extrai TPD-DB + PROTAC-DB + PROTACpedia para a aba PAPERS da
+RevisãoPROTAC.xlsx, remove duplicatas e pinta cada linha pela base de origem.
 
-Gerado por script para ser reproduzível: para mudar o notebook, edite aqui e
-rode de novo.
+É AUTOCONTIDO de propósito: roda na workstation do lab sem importar nada deste
+repositório, só pandas + openpyxl (RDKit é opcional).
 
     python scripts/build_revisao_notebook.py
 """
@@ -20,7 +18,6 @@ CELLS = []
 
 
 def _id() -> str:
-    """nbformat 4.5+ exige id por célula; sem ele o Jupyter avisa a cada leitura."""
     return f"c{len(CELLS):03d}"
 
 
@@ -36,482 +33,708 @@ def code(src: str):
 
 
 # ===========================================================================
-# CAPA
-# ===========================================================================
-md(r"""
-# Revisão PROTAC — coleta automatizada dos parâmetros da aba PAPERS
+md(r'''
+# Revisão PROTAC — TPD-DB + PROTAC-DB + PROTACpedia → RevisãoPROTAC.xlsx
 
-Preenche as 28 colunas da aba **PAPERS** da sua planilha a partir de quatro
-bases: **PROTAC-DB**, **PROTACpedia**, **PROTAC-Bench** e **PROTAC-PatentDB**.
+Preenche as 28 colunas da aba **PAPERS**, remove PROTACs duplicados e pinta
+cada linha com a cor da base de origem.
 
-**Você preenche uma célula só** — a §1, com o alvo. O resto roda em sequência.
+**Edite só a §1** (os caminhos). Depois `Run All`.
 
-## Como usar
+## Entrada
 
-1. Rode a §0 (preparação).
-2. Preencha a **§1** com o seu alvo e rode.
-3. Rode a §2 → §6 na ordem. A §6 grava o `.xlsx`.
-
-## O que esperar de cada base
-
-Nenhuma base preenche as 28 colunas, e isso é esperado — você já disse que não
-há problema. Vale saber de onde vem o quê, porque muda o que você deve
-procurar na mão depois:
-
-| Base | O que preenche bem | O que não tem |
+| Base | Arquivo(s) | Linhas |
 |---|---|---|
-| **PROTAC-DB** | DC₅₀, Dmax, IC₅₀, MW, DOI, linhagem, E3, tipo de linker; na 3.0 também PK (Tmax, T½, Cmax, AUC, CL, Vss) e permeabilidade | — é a mais completa para esta planilha |
-| **PROTACpedia** | tipo de linker, anotação de ensaio, DC₅₀/Dmax, DOI | PK; **o download exige cadastro gratuito** |
-| **PROTAC-Bench** | SMILES, E3, rótulo de atividade, DC₅₀ quando existe | bibliografia, PK, permeabilidade; **identifica o alvo só por UniProt** |
-| **PROTAC-PatentDB** | MW e permeabilidade (**previstas**, não medidas), patente, data | potência medida, DOI de artigo |
+| TPD-DB | `PROTAC_main_table.txt` + `PROTAC_activity.txt` | ~21 400 + ~23 300 |
+| PROTAC-DB | `protacdb_20220210.csv` | ~1 200 |
+| PROTACpedia | `protac.xlsx` | ~15 500 |
 
-Duas consequências práticas, que o notebook trata mas vale você saber:
+## Cores da aba PAPERS
 
-- **O PROTAC-Bench só conhece o alvo por acessão UniProt.** Filtrar por `BRD4`
-  zera essa base. Por isso a §1 pede o UniProt junto — e a §3 avisa quando
-  isso aconteceu, em vez de deixar passar como "não há dado".
-- **O PROTAC-PatentDB traz valor previsto por ADMETlab, não medido.** Entra na
-  planilha, mas a aba `PROVENIENCIA` registra a origem de cada linha. Não
-  misture com medida experimental sem marcar — numa revisão isso é erro grave.
+| Cor | Origem |
+|---|---|
+| 🟦 azul | só TPD-DB |
+| 🟩 verde | só PROTAC-DB |
+| 🟨 amarelo | só PROTACpedia |
+| 🟧 laranja | **mesma molécula em mais de uma base** (linha consolidada) |
 
-## Honestidade sobre as colunas
+## Duas coisas que você precisa saber
 
-O notebook **não depende do nome exato das colunas de cada base**. Cada
-parâmetro tem uma lista de apelidos (`APELIDOS`, em `scripts/protac_fontes.py`)
-comparada contra o nome normalizado da coluna de origem — `DC50 (nM)`, `DC₅₀`
-e `dc50_nm` são reconhecidos como a mesma coisa.
+**1. Os rótulos das bases podem estar trocados.** Pelo conteúdo,
+`protacdb_20220210.csv` tem campos de curadoria colaborativa (`Curator`,
+`Status`, `Best PROTAC`) que são a assinatura da **PROTACpedia**, enquanto
+`protac.xlsx` tem as 89 colunas com PAMPA/Caco-2 e anotação de ensaio que são a
+assinatura do **PROTAC-DB 3.0**. Mantive os nomes que você usou, mas eles ficam
+em `ROTULOS` na §1 — se concordar que estão invertidos, troque as duas strings
+ali e o resto (cores, legenda, proveniência) acompanha.
 
-Isso é deliberado. Se os nomes estivessem fixos no código, a próxima versão de
-qualquer uma das bases quebraria a coleta **em silêncio**: a coluna viria vazia
-e pareceria "a base não tem esse dado", que é o erro mais difícil de notar numa
-revisão. Em vez disso, a §3 imprime as **colunas de origem que ficaram sem
-destino** — é ali que aparece um parâmetro que a base tem e o mapa não
-reconheceu. Para corrigir, você acrescenta um apelido e roda de novo.
-
-Pelo mesmo motivo, **nenhum caminho de arquivo está chutado no código**: o
-módulo lê a página de download de cada base e pega os links que encontrar (ou
-usa a API pública do Figshare e do Hugging Face).
-""")
-
+**2. Oito colunas vão sair vazias, e não é defeito.** Nenhuma das três bases
+traz farmacocinética: `Tmax`, `T 1/2`, `Cmax`, `AUC`, `Vz`, `Vss`, `CL`, `MRT`.
+Também não há `Título Paper`, `Data` nem `Classe do Alvo` em nenhuma delas. A
+§5 lista exatamente o que ficou vazio.
+''')
 
 # ===========================================================================
-# 0. PREPARAÇÃO
-# ===========================================================================
-md(r"""
+md(r'''
 ---
-## §0 — Preparação
+## §1 — Caminhos (a única célula para editar)
+''')
 
-Precisa de `pandas` e `openpyxl`, que já estão nos envs do projeto. `rdkit` é
-**opcional**: com ele a deduplicação usa SMILES canônico e o comprimento do
-linker pode ser estimado; sem ele a comparação é por texto e o notebook avisa.
-""")
-
-code(r"""
-import sys
+code(r'''
 from pathlib import Path
 
-# A lógica vive em scripts/protac_fontes.py. Se você rodar este notebook de
-# fora do repositório, ajuste RAIZ para a pasta do projeto.
-RAIZ = Path.cwd()
-if not (RAIZ / "scripts" / "protac_fontes.py").exists():
-    RAIZ = RAIZ.parent          # típico: o notebook está em notebooks/
-if not (RAIZ / "scripts" / "protac_fontes.py").exists():
-    raise SystemExit(
-        "não achei scripts/protac_fontes.py — ajuste RAIZ para a pasta do projeto"
+# ====================  PREENCHA AQUI  ======================================
+
+PASTA = Path(r"dados")          # pasta com os arquivos das bases
+
+TPD_MAIN     = PASTA / "PROTAC_main_table.txt"
+TPD_ACTIVITY = PASTA / "PROTAC_activity.txt"
+PROTACDB_CSV = PASTA / "protacdb_20220210.csv"
+PROTACPEDIA  = PASTA / "protac.xlsx"
+
+# Sua planilha, usada como molde para preservar a formatação.
+# Se não existir, o notebook cria o arquivo do zero com os mesmos cabeçalhos.
+# ESTE ARQUIVO NUNCA É SOBRESCRITO.
+MODELO = PASTA / "RevisãoPROTAC.xlsx"
+
+SAIDA = Path("resultados") / "RevisaoPROTAC_preenchida.xlsx"
+
+# Filtro opcional. None = todas as moléculas das três bases (~35 mil linhas).
+# Para restringir, p.ex.: ALVO = "BRD4"   /   ALVO = "AR"
+ALVO = None
+
+# Se os rótulos estiverem trocados (ver a nota na capa), inverta as duas
+# strings abaixo — cores, legenda e proveniência seguem automaticamente.
+ROTULOS = {
+    "csv":   "PROTAC-DB",     # o que está em protacdb_20220210.csv
+    "xlsx":  "PROTACpedia",   # o que está em protac.xlsx
+    "tpd":   "TPD-DB",
+}
+
+CORES = {
+    ROTULOS["tpd"]:  "DDEBF7",   # azul
+    ROTULOS["csv"]:  "E2EFDA",   # verde
+    ROTULOS["xlsx"]: "FFF2CC",   # amarelo
+    "múltiplas":     "FCE4D6",   # laranja
+}
+
+# ===========================================================================
+
+SAIDA.parent.mkdir(parents=True, exist_ok=True)
+
+faltando = [str(p) for p in (TPD_MAIN, TPD_ACTIVITY, PROTACDB_CSV, PROTACPEDIA)
+            if not p.exists()]
+if faltando:
+    raise FileNotFoundError(
+        "não encontrei:\n  " + "\n  ".join(faltando) +
+        f"\n\nAjuste PASTA (agora: {PASTA.resolve()})"
     )
-
-sys.path.insert(0, str(RAIZ / "scripts"))
-import protac_fontes as pf
-
-print("módulo:", pf.__file__)
-print("parâmetros da aba PAPERS:", len(pf.CHAVES))
-print("bases:", ", ".join(pf.FONTES))
-print("RDKit:", "sim" if pf.rdkit_disponivel() else
-      "não (deduplicação por texto; sem estimativa de comprimento de linker)")
-""")
-
+print("arquivos de entrada: ok")
+print(f"modelo: {MODELO if MODELO.exists() else '(não existe — criarei do zero)'}")
+print(f"saída:  {SAIDA}")
+print(f"filtro: {ALVO or 'nenhum (todas as moléculas)'}")
+''')
 
 # ===========================================================================
-# 1. O INPUT
-# ===========================================================================
-md(r"""
+md(r'''
 ---
-## §1 — O input (a única célula que você precisa editar)
+## §2 — As 28 colunas e as funções de leitura
 
-`ALVO` costuma bastar. Os outros campos existem por motivos concretos:
+Os rótulos são copiados da planilha **com os defeitos de digitação** (`Gl₅₀`
+com L, `Comprimeto`, os espaços sobrando). Se eu os corrigisse, o arquivo
+deixaria de bater coluna a coluna com a sua planilha.
+''')
 
-- **`UNIPROT`** — o PROTAC-Bench não traz nome de gene. Sem a acessão, aquela
-  base sai zerada. Pegue em [uniprot.org](https://www.uniprot.org/).
-- **`SINONIMOS`** — as bases escrevem a mesma proteína de formas diferentes
-  (`PCSK9` vs. `proprotein convertase subtilisin/kexin type 9`). Sem o
-  sinônimo, linhas do seu alvo são descartadas.
-- **`E3`**, **`LINHAGEM`** — só se você quiser restringir. Deixe `None` para não.
-- **`SO_COM_DEGRADACAO`** — `True` descarta o que não tem DC₅₀ nem Dmax. Útil
-  para a revisão de atividade; atrapalha se você quer cobertura química.
-- **`UNIDADES_FIXAS`** — `True` converte potências para nM como número puro
-  (bom para ordenar e fazer gráfico). `False` mantém o texto com unidade e
-  qualificador (`>10 μM`), que é o que faz sentido ler na planilha.
-
-> Os critérios combinam em **E** (alvo **e** E3 **e** linhagem). O alvo, os
-> sinônimos e o UniProt combinam entre si em **OU** — são nomes do mesmo alvo.
-""")
-
-code(r"""
-# =====================  PREENCHA AQUI  =====================================
-
-ALVO = "BRD4"                  # proteína-alvo
-UNIPROT = "O60885"             # acessão; necessária para o PROTAC-Bench
-SINONIMOS = ["BRD-4", "bromodomain containing 4", "bromodomain 4"]
-
-E3 = None                      # "VHL", "CRBN", ... ou None
-LINHAGEM = None                # "MV4-11", ... ou None
-TEXTO_LIVRE = None             # busca em qualquer coluna, ou None
-
-BASES = ["PROTAC-DB", "PROTACpedia", "PROTAC-Bench", "PROTAC-PatentDB"]
-
-SO_COM_DEGRADACAO = False      # True = exige DC₅₀ ou Dmax
-UNIDADES_FIXAS = False         # True = potências em nM, número puro
-CONSOLIDAR = True              # True = junta o mesmo composto vindo de 2 bases
-
-DIR_DADOS = RAIZ / "dados" / "bases"   # onde os arquivos das bases ficam
-BAIXAR = True                          # False = usa só o que já está em disco
-
-# Sua planilha, para a saída sair com a formatação dela. None = cria do zero.
-# O arquivo apontado aqui NUNCA é sobrescrito.
-MODELO = None                  # p.ex. RAIZ / "dados" / "Revisao_PROTAC.xlsx"
-
-SAIDA = RAIZ / "resultados" / f"revisao_{(ALVO or 'tudo').replace('/', '_')}.xlsx"
-SAIDA_CSV = SAIDA.with_suffix(".csv")
-
-# ===========================================================================
-
-# A ORDEM DE `BASES` É ORDEM DE PREFERÊNCIA: quando o mesmo composto aparece em
-# duas bases, o valor da primeira ganha. Com PROTAC-DB antes de
-# PROTAC-PatentDB, a medida experimental ganha da prevista — que é o que se
-# quer. Se você inverter, inverte isso também.
-pedido = pf.Pedido(
-    alvo=ALVO,
-    uniprot=UNIPROT,
-    sinonimos=SINONIMOS,
-    e3=E3,
-    linhagem=LINHAGEM,
-    texto_livre=TEXTO_LIVRE,
-    bases=BASES,
-    so_com_degradacao=SO_COM_DEGRADACAO,
-    unidades_fixas=UNIDADES_FIXAS,
-    consolidar_duplicatas=CONSOLIDAR,
-)
-
-print("pedido montado:")
-print(f"  alvo .......... {ALVO}  (uniprot {UNIPROT})")
-print(f"  sinônimos ..... {', '.join(SINONIMOS) if SINONIMOS else '—'}")
-print(f"  E3 / linhagem . {E3 or '—'} / {LINHAGEM or '—'}")
-print(f"  bases ......... {', '.join(BASES)}")
-print(f"  dados em ...... {DIR_DADOS}")
-print(f"  saída ......... {SAIDA}")
-""")
-
-
-# ===========================================================================
-# 2. OS ARQUIVOS DAS BASES
-# ===========================================================================
-md(r"""
----
-## §2 — Conseguir os arquivos
-
-A célula abaixo, para cada base: procura em `DIR_DADOS` o que já existe; se não
-houver nada e `BAIXAR=True`, descobre os links e baixa.
-
-**O que pode dar errado, e o que fazer:**
-
-- **PROTACpedia** exige cadastro (gratuito) para o download completo. O módulo
-  não automatiza o login — seria guardar sua senha num notebook. Faça o login
-  em [protacpedia.weizmann.ac.il](https://protacpedia.weizmann.ac.il/ptcb/main),
-  baixe o CSV/SDF e salve em `DIR_DADOS/PROTACpedia/`.
-- **Rede fechada ou base fora do ar**: a mensagem diz em qual página baixar na
-  mão e em qual pasta salvar. Uma base que falha **não derruba as outras três**.
-- **Formato**: `.csv`, `.tsv`, `.xlsx`, `.json`, `.parquet`, `.sdf`, `.zip` e
-  `.gz` são lidos. Para SDF só o bloco de propriedades é lido (sem RDKit), então
-  se o SDF não tiver o SMILES como propriedade, prefira o CSV da mesma base.
-
-Para só inspecionar sem baixar nada, ponha `BAIXAR = False` na §1.
-""")
-
-code(r"""
-DIR_DADOS.mkdir(parents=True, exist_ok=True)
-
-for nome_base in BASES:
-    fonte = pf.FONTES[nome_base]
-    arquivos, registro = pf.obter_arquivos(fonte, DIR_DADOS, baixar=BAIXAR)
-    print(f"\n{'=' * 70}\n{nome_base}\n{'=' * 70}")
-    print(f"  {fonte.descricao}")
-    print(f"  página: {fonte.pagina}")
-    if fonte.observacao:
-        print(f"  nota:   {fonte.observacao}")
-    for linha in registro:
-        print(f"  · {linha}")
-    if arquivos:
-        for caminho in arquivos:
-            tamanho = caminho.stat().st_size / 1024
-            print(f"  → {caminho.name}  ({tamanho:,.0f} kB)")
-    else:
-        print(f"  → nada em disco. Salve o arquivo em: {DIR_DADOS / nome_base}/")
-""")
-
-
-# ===========================================================================
-# 3. A COLETA
-# ===========================================================================
-md(r"""
----
-## §3 — Coletar, mapear e filtrar
-
-Lê cada arquivo, traduz as colunas para o vocabulário da planilha, aplica o
-filtro da §1, padroniza unidades e junta duplicatas entre bases.
-
-**Leia o relatório inteiro**, não só a contagem final. Três partes importam:
-
-1. **Preenchimento por parâmetro** — quantas linhas têm cada dado. É o mapa do
-   que vai sobrar para você buscar na mão.
-2. **Colunas de origem sem destino** — colunas que as bases trazem e o mapa não
-   reconheceu. **É aqui que aparece dado perdido.** Se algo útil estiver nessa
-   lista, acrescente um apelido em `pf.APELIDOS` (§5) e rode de novo.
-3. **Avisos** — em especial o de base que não identifica o alvo por nome.
-""")
-
-code(r"""
-resultado = pf.coletar(pedido, dir_dados=DIR_DADOS, baixar=BAIXAR)
-print(resultado.relatorio())
-""")
-
-md(r"""
-### A tabela
-
-As colunas aparecem com os nomes internos (ASCII); os rótulos da planilha
-entram na exportação. Vazio (`<NA>`) significa "a base não traz", e é esperado.
-""")
-
-code(r"""
+code(r'''
+import re
+import warnings
 import pandas as pd
 
-pd.set_option("display.max_columns", 50)
-pd.set_option("display.width", 220)
-pd.set_option("display.max_colwidth", 28)
+warnings.simplefilter("ignore")
 
-tabela = resultado.tabela
-print(f"{len(tabela)} linha(s)\n")
+# (chave interna, rótulo exato da planilha)
+PARAMETROS = [
+    ("idx", "-"), ("titulo", "Título Paper "), ("doi", "DOI"),
+    ("smiles", "SMILES"), ("mw", "MW"), ("data", "Data"),
+    ("ic50", "IC₅₀"), ("ec50", "EC₅₀"), ("gi50", "Gl₅₀"), ("ed50", "ED₅₀"),
+    ("gr50", "GR₅₀"), ("pampa", "PAMPA "), ("caco2", "Caco-2 "),
+    ("tmax", "Tmax"), ("t_meia", "T 1/2"), ("cmax", "Cmax"), ("auc", "AUC"),
+    ("vz", "Vz"), ("vss", "Vss"), ("cl", "CL"), ("mrt", "MRT"),
+    ("dc50", "DC₅₀"), ("dmax", "Dmax"), ("e3", "E3 Ligase Usada"),
+    ("linker_tipo", "Tipo de linker"), ("linker_comprimento", "Comprimeto do Linker"),
+    ("classe_alvo", "Classe do Alvo "), ("linhagem", "Linhagem Celular"),
+]
+CHAVES = [k for k, _ in PARAMETROS]
+ROTULOS_COL = dict(PARAMETROS)
 
-if tabela.empty:
-    print("Nada encontrado. Antes de concluir que não há dado, verifique:")
-    print("  · a §2 conseguiu algum arquivo? (sem arquivo não há o que filtrar)")
-    print("  · o alvo está escrito como as bases escrevem? acrescente SINONIMOS")
-    print("  · o UNIPROT está preenchido? sem ele o PROTAC-Bench sai zerado")
-    print("  · SO_COM_DEGRADACAO=True pode estar descartando tudo")
+# colunas extras, que saem na aba PROVENIENCIA (não na PAPERS)
+EXTRAS = ["fonte", "id_fonte", "nome", "alvo", "uniprot", "referencia"]
+
+
+def limpar(v):
+    """Normaliza célula e transforma os vários 'vazios' das bases em NA."""
+    if v is None or (isinstance(v, float) and pd.isna(v)):
+        return pd.NA
+    s = str(v).strip()
+    if s in ("", ".", "-", "NA", "N/A", "nan", "None", "null", "ND", "n.d."):
+        return pd.NA
+    return re.sub(r"\s+", " ", s)
+
+
+_RE_NUM = re.compile(r"^\s*(?P<q>[<>≤≥~≈]{0,2})\s*(?P<v>[-+]?\d+(?:[.,]\d+)?(?:[eE][-+]?\d+)?)")
+
+
+def valor_num(v):
+    """Número de uma célula tipo '417nM', '>10000.0nM', '95%'. None se não houver.
+
+    Serve só para ESCOLHER entre medições; o que vai para a planilha é sempre
+    o texto original, com unidade e qualificador.
+    """
+    s = limpar(v)
+    if s is pd.NA:
+        return None
+    m = _RE_NUM.match(str(s))
+    if not m:
+        return None
+    try:
+        return float(m.group("v").replace(",", "."))
+    except ValueError:
+        return None
+
+
+# Massa atômica média, para calcular MW a partir da fórmula do TPD-DB (que não
+# traz MW). Cobre os elementos que aparecem em PROTAC.
+_MASSAS = {
+    "C": 12.011, "H": 1.008, "N": 14.007, "O": 15.999, "S": 32.06,
+    "P": 30.974, "F": 18.998, "Cl": 35.45, "Br": 79.904, "I": 126.904,
+    "Si": 28.085, "B": 10.81, "Se": 78.971, "Na": 22.990, "K": 39.098,
+    "Li": 6.94, "D": 2.014,
+}
+_RE_FORMULA = re.compile(r"([A-Z][a-z]?)(\d*)")
+
+
+def mw_da_formula(formula):
+    """MW médio a partir de 'C34H31F3N8O4'. None se a fórmula tiver algo fora da tabela."""
+    s = limpar(formula)
+    if s is pd.NA:
+        return None
+    s = str(s).replace(" ", "")
+    if not s or not re.fullmatch(r"(?:[A-Z][a-z]?\d*)+", s):
+        return None
+    total = 0.0
+    for elem, qtd in _RE_FORMULA.findall(s):
+        if elem not in _MASSAS:
+            return None
+        total += _MASSAS[elem] * (int(qtd) if qtd else 1)
+    return round(total, 2) if total else None
+
+
+def quadro_vazio(n):
+    """DataFrame com todas as colunas canônicas, para cada base preencher."""
+    return pd.DataFrame({c: pd.Series([pd.NA] * n, dtype="object")
+                         for c in CHAVES + EXTRAS})
+
+
+print(f"{len(CHAVES)} colunas da aba PAPERS definidas")
+''')
+
+# ===========================================================================
+md(r'''
+---
+## §3 — Ler as três bases
+
+### TPD-DB
+
+A atividade vem em **formato longo** (uma linha por medição), então precisa ser
+pivotada: ~23 300 medições viram uma linha por molécula. Quando há várias
+medições do mesmo tipo para a mesma molécula, a escolha é:
+
+- **DC₅₀, IC₅₀, EC₅₀, GI₅₀, ED₅₀, GR₅₀** → a **menor** (mais potente)
+- **Dmax** → o **maior** (maior degradação)
+
+O que vai para a célula é sempre o **texto original** da medição escolhida
+(`417nM`, `>10000.0nM`), não um número reconvertido — e a linhagem celular é a
+daquela medição. Medições qualitativas (`+++`) entram como texto quando não há
+nenhuma numérica.
+
+`Activity Type` tem sufixos (`DC50_1`, `DC50 (SU-DHL-2)`, `IC50 (EGFR WT)`), então
+o tipo é reconhecido pelo **início** da string.
+''')
+
+code(r'''
+# --- TPD-DB: tabela principal -------------------------------------------
+tpd = pd.read_csv(TPD_MAIN, sep="\t", dtype=str, keep_default_na=False)
+print(f"TPD-DB main:     {len(tpd):>6} linhas, colunas: {list(tpd.columns)}")
+
+# --- TPD-DB: atividade (formato longo) ----------------------------------
+act = pd.read_csv(TPD_ACTIVITY, sep="\t", dtype=str, keep_default_na=False)
+print(f"TPD-DB activity: {len(act):>6} linhas, colunas: {list(act.columns)}")
+
+# Qual chave da planilha cada Activity Type alimenta. A ordem importa: 'DIC50'
+# começa com 'D', então 'DC50' tem de ser testado antes de 'IC50' não casar
+# errado — por isso comparo com startswith sobre a lista nesta ordem.
+TIPOS = [("DC50", "dc50"), ("DMAX", "dmax"), ("IC50", "ic50"),
+         ("EC50", "ec50"), ("GI50", "gi50"), ("ED50", "ed50"), ("GR50", "gr50")]
+MAIOR_MELHOR = {"dmax"}          # Dmax: quanto maior, melhor
+
+
+def tipo_da_medicao(texto):
+    t = str(texto).strip().upper()
+    for prefixo, chave in TIPOS:
+        if t.startswith(prefixo):
+            return chave
+    return None
+
+
+act["_chave"] = act["Activity Type"].map(tipo_da_medicao)
+act["_num"] = act["Activity"].map(valor_num)
+reconhecidas = act["_chave"].notna().sum()
+print(f"  medições reconhecidas: {reconhecidas} de {len(act)} "
+      f"({len(act) - reconhecidas} são de tipos que a planilha não tem, "
+      f"p.ex. 'Residual rate', 'Cell viability')")
+
+# pivot: uma linha por TPD ID, uma coluna por parâmetro
+melhor = {}
+for (tpd_id, chave), grupo in act[act["_chave"].notna()].groupby(
+        ["TPD ID", "_chave"], sort=False):
+    com_num = grupo[grupo["_num"].notna()]
+    if len(com_num):
+        linha = (com_num.loc[com_num["_num"].idxmax()] if chave in MAIOR_MELHOR
+                 else com_num.loc[com_num["_num"].idxmin()])
+    else:
+        linha = grupo.iloc[0]
+    melhor.setdefault(tpd_id, {})[chave] = (limpar(linha["Activity"]),
+                                            limpar(linha["Cell Line"]))
+
+print(f"  moléculas com alguma atividade: {len(melhor)}")
+
+# --- TPD-DB: montar no formato da planilha ------------------------------
+t = quadro_vazio(len(tpd))
+t["smiles"] = tpd["SMILES"].map(limpar)
+t["e3"] = tpd["Ligase"].map(limpar)
+t["nome"] = tpd["TPD NAME"].map(limpar)
+t["alvo"] = tpd["Target Symbol"].map(limpar)
+t["uniprot"] = tpd["Target ID"].map(limpar)
+t["id_fonte"] = tpd["TPD ID"].map(limpar)
+# O TPD-DB não traz MW; a fórmula permite calcular o valor médio exato.
+t["mw"] = tpd["Fomula"].map(lambda f: mw_da_formula(f) or pd.NA)
+# 'Source' é a referência (patente ou artigo), e vai para a coluna DOI porque
+# a planilha não tem coluna de patente. Fica registrado em PROVENIENCIA.
+t["doi"] = tpd["Source"].map(limpar)
+t["referencia"] = tpd["Source"].map(limpar)
+t["fonte"] = ROTULOS["tpd"]
+
+for i, tpd_id in enumerate(tpd["TPD ID"]):
+    dados = melhor.get(tpd_id)
+    if not dados:
+        continue
+    for chave, (valor, celula) in dados.items():
+        t.iat[i, t.columns.get_loc(chave)] = valor
+        if celula is not pd.NA and t.iat[i, t.columns.get_loc("linhagem")] is pd.NA:
+            t.iat[i, t.columns.get_loc("linhagem")] = celula
+
+print(f"  -> {len(t)} linhas, {int(t['mw'].notna().sum())} com MW calculado da fórmula")
+''')
+
+md(r'''
+### PROTAC-DB (`protacdb_20220210.csv`)
+
+Esta base não traz DOI, só `Pubmed`. O identificador entra na coluna DOI como
+`PMID:xxxxxxxx` — é a referência que existe, e fica marcada como PMID para não
+se confundir com um DOI. `linker_ha` (átomos pesados do linker) preenche
+*Comprimeto do Linker*.
+''')
+
+code(r'''
+db = pd.read_csv(PROTACDB_CSV, dtype=str, keep_default_na=False, encoding="utf-8-sig")
+print(f"PROTAC-DB: {len(db)} linhas, {len(db.columns)} colunas")
+
+d = quadro_vazio(len(db))
+d["smiles"] = db["PROTAC SMILES"].map(limpar)
+d["mw"] = db["MW"].map(limpar)
+d["dc50"] = db["Dc50"].map(limpar)
+d["dmax"] = db["Dmax"].map(limpar)
+d["ic50"] = db["Ic50 of PROTAC"].map(limpar)
+d["ec50"] = db["Ec50 of PROTAC Cells"].map(limpar)
+d["e3"] = db["E3 Ligase"].map(limpar)
+d["linker_tipo"] = db["Linker Type"].map(limpar)
+d["linker_comprimento"] = db["linker_ha"].map(limpar)
+d["linhagem"] = db["Cells"].map(limpar)
+d["uniprot"] = db["Target"].map(limpar)          # nesta base, Target é acessão
+d["alvo"] = db["Target"].map(limpar)
+d["nome"] = db["PROTAC Name"].map(limpar)
+d["id_fonte"] = db["PROTACDB ID"].map(limpar)
+pmid = db["Pubmed"].map(limpar)
+d["doi"] = pmid.map(lambda p: f"PMID:{p}" if p is not pd.NA else pd.NA)
+d["referencia"] = d["doi"]
+d["fonte"] = ROTULOS["csv"]
+
+print(f"  -> {len(d)} linhas, {int(d['dc50'].notna().sum())} com DC₅₀")
+''')
+
+md(r'''
+### PROTACpedia (`protac.xlsx`)
+
+A base mais rica: 89 colunas, incluindo PAMPA e Caco-2. Duas escolhas:
+
+- **IC₅₀/EC₅₀**: há três conjuntos (PROTAC→alvo, PROTAC→E3, atividade celular).
+  Uso o **celular** e caio para o PROTAC→alvo quando o celular está vazio — é o
+  que as outras duas bases reportam, então fica comparável.
+- **Linhagem celular**: não existe como coluna, mas está escrita no texto do
+  ensaio (`"Degradation of BRD9 in HeLa cells after 4 h"`). Extraio com regex o
+  termo antes de *cells*. Onde o padrão não casa, a célula fica vazia em vez de
+  receber o texto inteiro do ensaio.
+''')
+
+code(r'''
+pedia = pd.read_excel(PROTACPEDIA, dtype=str)
+print(f"PROTACpedia: {len(pedia)} linhas, {len(pedia.columns)} colunas")
+
+# "Degradation of BRD9 in HeLa cells after 4 h" -> "HeLa"
+_RE_CELULA = re.compile(r"\bin\s+([A-Za-z0-9][A-Za-z0-9\-\./+]*)\s+cells?\b", re.I)
+
+
+def celula_do_ensaio(texto):
+    s = limpar(texto)
+    if s is pd.NA:
+        return pd.NA
+    m = _RE_CELULA.search(str(s))
+    return m.group(1) if m else pd.NA
+
+
+def coalesce(*series):
+    """Primeira série com valor, célula a célula."""
+    out = series[0].copy()
+    for s in series[1:]:
+        out = out.where(out.notna(), s)
+    return out
+
+
+p = quadro_vazio(len(pedia))
+p["smiles"] = pedia["Smiles"].map(limpar)
+p["mw"] = pedia["Molecular Weight"].map(limpar)
+p["doi"] = pedia["Article DOI"].map(limpar)
+p["referencia"] = p["doi"]
+p["dc50"] = pedia["DC50 (nM)"].map(limpar)
+p["dmax"] = pedia["Dmax (%)"].map(limpar)
+p["ic50"] = coalesce(pedia["IC50 (nM, Cellular activities)"].map(limpar),
+                     pedia["IC50 (nM, Protac to Target)"].map(limpar))
+p["ec50"] = coalesce(pedia["EC50 (nM, Cellular activities)"].map(limpar),
+                     pedia["EC50 (nM, Protac to Target)"].map(limpar))
+p["gi50"] = pedia["GI50 (nM, Cellular activities)"].map(limpar)
+p["ed50"] = pedia["ED50 (nM, Cellular activities)"].map(limpar)
+p["gr50"] = pedia["GR50 (nM, Cellular activities)"].map(limpar)
+p["pampa"] = pedia["PAMPA Papp (nm/s, Permeability)"].map(limpar)
+p["caco2"] = pedia["Caco-2 A2B Papp (nm/s, Permeability)"].map(limpar)
+p["e3"] = pedia["E3 ligase"].map(limpar)
+p["alvo"] = pedia["Target"].map(limpar)
+p["uniprot"] = pedia["Uniprot"].map(limpar)
+p["nome"] = pedia["Name"].map(limpar)
+p["id_fonte"] = pedia["Compound ID"].map(limpar)
+p["linhagem"] = coalesce(pedia["Assay (DC50/Dmax)"].map(celula_do_ensaio),
+                         pedia["Assay (Percent degradation)"].map(celula_do_ensaio))
+p["fonte"] = ROTULOS["xlsx"]
+
+print(f"  -> {len(p)} linhas, {int(p['linhagem'].notna().sum())} com linhagem "
+      f"extraída do texto do ensaio")
+''')
+
+# ===========================================================================
+md(r'''
+---
+## §4 — Juntar e remover duplicatas
+
+A chave é o **SMILES canônico**. Com RDKit, duas grafias da mesma molécula
+colapsam corretamente; **sem RDKit**, a comparação é textual e duplicatas entre
+bases escapam (cada base escreve o SMILES do seu jeito). O notebook roda nos
+dois casos e avisa qual está em uso — se for rodar no `mdtools`, o RDKit está lá.
+
+Ao consolidar, para cada parâmetro fica o **primeiro valor não-vazio** na ordem
+PROTACpedia → PROTAC-DB → TPD-DB (a mais anotada primeiro). A coluna `fonte`
+registra **todas** as bases em que a molécula apareceu, e a linha ganha a cor
+laranja.
+''')
+
+code(r'''
+try:
+    from rdkit import Chem, RDLogger
+    RDLogger.DisableLog("rdApp.*")
+    TEM_RDKIT = True
+except ImportError:
+    TEM_RDKIT = False
+
+print("RDKit:", "sim — deduplicação por SMILES canônico" if TEM_RDKIT else
+      "NÃO — deduplicação textual; duplicatas entre bases vão escapar")
+
+_cache = {}
+
+
+def chave_molecula(smiles):
+    s = limpar(smiles)
+    if s is pd.NA:
+        return pd.NA
+    s = str(s)
+    if s in _cache:
+        return _cache[s]
+    chave = s
+    if TEM_RDKIT:
+        mol = Chem.MolFromSmiles(s)
+        if mol is not None:
+            chave = Chem.MolToSmiles(mol)
+    _cache[s] = chave
+    return chave
+
+
+# Ordem de preferência: a base mais anotada ganha o valor em caso de conflito.
+ORDEM = [ROTULOS["xlsx"], ROTULOS["csv"], ROTULOS["tpd"]]
+por_fonte = {ROTULOS["xlsx"]: p, ROTULOS["csv"]: d, ROTULOS["tpd"]: t}
+bruto = pd.concat([por_fonte[f] for f in ORDEM], ignore_index=True)
+print(f"\nlinhas somadas: {len(bruto)}")
+
+if ALVO:
+    alvo_norm = str(ALVO).strip().lower()
+    mascara = False
+    for col in ("alvo", "uniprot", "nome"):
+        mascara = mascara | bruto[col].astype("string").str.lower().str.contains(
+            re.escape(alvo_norm), na=False)
+    bruto = bruto[mascara].copy()
+    print(f"após filtro ALVO={ALVO!r}: {len(bruto)} linhas")
+
+bruto["_chave"] = bruto["smiles"].map(chave_molecula)
+sem_smiles = bruto[bruto["_chave"].isna()]
+com_smiles = bruto[bruto["_chave"].notna()]
+print(f"sem SMILES (não dá para deduplicar, passam intactas): {len(sem_smiles)}")
+
+COLS_JUNTAR = {"fonte", "id_fonte", "referencia"}
+
+linhas = []
+for _, grupo in com_smiles.groupby("_chave", sort=False):
+    if len(grupo) == 1:
+        linhas.append(grupo.iloc[0].to_dict())
+        continue
+    nova = {}
+    for col in grupo.columns:
+        if col == "_chave":
+            continue
+        if col in COLS_JUNTAR:
+            vistos, unicos = set(), []
+            for v in grupo[col]:
+                v = limpar(v)
+                if v is not pd.NA and str(v) not in vistos:
+                    vistos.add(str(v))
+                    unicos.append(str(v))
+            nova[col] = "; ".join(unicos) if unicos else pd.NA
+        else:
+            validos = grupo[col].dropna()
+            nova[col] = validos.iloc[0] if len(validos) else pd.NA
+    nova["_chave"] = grupo.iloc[0]["_chave"]
+    linhas.append(nova)
+
+final = pd.concat(
+    [pd.DataFrame(linhas), sem_smiles.to_frame().T if isinstance(sem_smiles, pd.Series)
+     else sem_smiles],
+    ignore_index=True,
+).drop(columns=["_chave"], errors="ignore")
+
+# Útil para revisar: quem tem DC₅₀ primeiro, que é o dado mais caro de obter.
+final["_sem_dc50"] = final["dc50"].isna()
+final = final.sort_values("_sem_dc50", kind="stable").drop(columns=["_sem_dc50"])
+final = final.reset_index(drop=True)
+final["idx"] = range(1, len(final) + 1)
+
+n_multi = int(final["fonte"].astype("string").str.contains(";", na=False).sum())
+print(f"\nlinhas após remover duplicatas: {len(final)}  "
+      f"({len(bruto) - len(final)} duplicatas eliminadas)")
+print(f"moléculas presentes em mais de uma base: {n_multi}")
+print("\ncontribuição por base (uma linha pode citar várias):")
+for fonte in ORDEM:
+    n = int(final["fonte"].astype("string").str.contains(re.escape(fonte), na=False).sum())
+    print(f"  {fonte:<14} {n:>6}")
+''')
+
+# ===========================================================================
+md(r'''
+---
+## §5 — O que ficou preenchido
+
+Antes de exportar: quantas linhas têm cada parâmetro. As oito colunas de
+farmacocinética saem em 0% porque nenhuma das três bases as traz.
+''')
+
+code(r'''
+print(f"{len(final)} linhas\n")
+print(f"{'parâmetro':<24} {'linhas':>8} {'%':>7}")
+print("-" * 42)
+for chave in CHAVES:
+    if chave == "idx":
+        continue
+    n = int(final[chave].notna().sum())
+    marca = "   " if n else " ··"
+    print(f"{marca}{ROTULOS_COL[chave]:<21} {n:>8} {100 * n / max(len(final), 1):>6.1f}%")
+
+vazias = [ROTULOS_COL[c] for c in CHAVES if c != "idx" and final[c].isna().all()]
+print(f"\ncolunas sem nenhum dado ({len(vazias)}): {', '.join(vazias) if vazias else '—'}")
+
+display(final[["idx", "fonte", "alvo", "e3", "dc50", "dmax", "ic50", "mw",
+               "linhagem", "doi"]].head(15))
+''')
+
+# ===========================================================================
+md(r'''
+---
+## §6 — Exportar com as linhas coloridas
+
+Escreve a aba **PAPERS** (cabeçalho na linha 3, dados da linha 4) usando a sua
+planilha como molde quando ela existe — **sem nunca sobrescrevê-la**. Saem mais
+duas abas: `LEGENDA` (as cores) e `PROVENIENCIA` (de qual base e com qual id
+veio cada linha).
+''')
+
+code(r'''
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Font, PatternFill
+
+LINHA_INICIAL = 4
+
+if MODELO.exists():
+    if SAIDA.resolve() == MODELO.resolve():
+        raise ValueError("SAIDA igual ao MODELO — a planilha original não deve "
+                         "ser sobrescrita. Troque SAIDA na §1.")
+    wb = load_workbook(MODELO)
+    if "PAPERS" not in wb.sheetnames:
+        raise KeyError(f"o modelo não tem a aba 'PAPERS' (abas: {wb.sheetnames})")
+    ws = wb["PAPERS"]
+    print(f"usando {MODELO.name} como molde")
 else:
-    colunas_vista = [c for c in ["idx", "fonte", "alvo", "e3", "dc50", "dmax",
-                                 "ic50", "mw", "linhagem", "doi", "smiles"]
-                     if c in tabela.columns]
-    display(tabela[colunas_vista].head(30))
-""")
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "PAPERS"
+    for c, chave in enumerate(CHAVES, start=1):
+        ws.cell(row=3, column=c, value=ROTULOS_COL[chave]).font = Font(bold=True)
+    print("modelo não encontrado — planilha criada do zero")
 
 
-# ===========================================================================
-# 4. CONFERÊNCIA
-# ===========================================================================
-md(r"""
----
-## §4 — Conferência antes de exportar
-
-Três perguntas que vale responder antes de levar isso para a revisão.
-""")
-
-code(r"""
-if not tabela.empty:
-    print("1. Quantas linhas cada base contribuiu (após consolidação)")
-    print("   Uma linha pode citar duas bases: é o mesmo composto confirmado")
-    print("   nas duas, não contagem dobrada.")
-    for fonte_nome, n in tabela["fonte"].value_counts().items():
-        print(f"     {fonte_nome}: {n}")
-
-    print("\n2. Parâmetros que nenhuma linha preencheu")
-    print("   Candidatos a busca manual no artigo original.")
-    vazios = [pf.ROTULOS[c] for c in pf.CHAVES
-              if c != "idx" and c in tabela.columns and tabela[c].isna().all()]
-    print("     " + (", ".join(vazios) if vazios else "nenhum — todas têm algum dado"))
-
-    print("\n3. Linhas sem DOI")
-    print("   Sem referência não dá para citar na revisão; as de patente têm")
-    print("   número de patente na aba PROVENIENCIA.")
-    if "doi" in tabela.columns:
-        sem_doi = int(tabela["doi"].isna().sum())
-        print(f"     {sem_doi} de {len(tabela)}")
-""")
+def cor_da_linha(fonte):
+    """Laranja quando a molécula veio de mais de uma base."""
+    s = "" if fonte is pd.NA or pd.isna(fonte) else str(fonte)
+    return CORES["múltiplas"] if ";" in s else CORES.get(s, "FFFFFF")
 
 
-# ===========================================================================
-# 5. AJUSTAR O MAPA
-# ===========================================================================
-md(r"""
----
-## §5 — Quando uma coluna ficou sem destino
+preenchimentos = {cor: PatternFill("solid", fgColor=cor)
+                  for cor in set(CORES.values())}
 
-Se a §3 listou uma coluna de origem útil em **"COLUNAS DE ORIGEM SEM DESTINO"**,
-é porque o mapa não a reconheceu. Acrescente o apelido e rode a §3 de novo.
+for desloc, registro in enumerate(final.to_dict("records")):
+    linha = LINHA_INICIAL + desloc
+    fill = preenchimentos.get(cor_da_linha(registro.get("fonte")))
+    for col, chave in enumerate(CHAVES, start=1):
+        valor = registro.get(chave, pd.NA)
+        if valor is pd.NA or (not isinstance(valor, str) and pd.isna(valor)):
+            valor = None
+        elif not isinstance(valor, (int, float, str)):
+            valor = str(valor)
+        celula = ws.cell(row=linha, column=col, value=valor)
+        if fill is not None:
+            celula.fill = fill
 
-O padrão é comparado contra o nome **normalizado**: minúsculas, sem acento, sem
-pontuação, e com `₅₀` virando `50`. Confira com `pf.normalizar_nome(...)` antes
-de escrever o padrão — é mais rápido que adivinhar.
+print(f"aba PAPERS: {len(final)} linhas escritas (linha {LINHA_INICIAL} a "
+      f"{LINHA_INICIAL + len(final) - 1})")
 
-A célula abaixo está comentada de propósito: descomente e adapte.
-""")
+# --- LEGENDA -------------------------------------------------------------
+if "LEGENDA" in wb.sheetnames:
+    del wb["LEGENDA"]
+wsl = wb.create_sheet("LEGENDA")
+wsl.cell(row=1, column=1, value="Cor").font = Font(bold=True)
+wsl.cell(row=1, column=2, value="Origem da molécula").font = Font(bold=True)
+wsl.cell(row=1, column=3, value="Linhas").font = Font(bold=True)
+descricao = {
+    ROTULOS["tpd"]: f"só {ROTULOS['tpd']}",
+    ROTULOS["csv"]: f"só {ROTULOS['csv']}",
+    ROTULOS["xlsx"]: f"só {ROTULOS['xlsx']}",
+    "múltiplas": "mesma molécula em mais de uma base (linha consolidada)",
+}
+coluna_fonte = final["fonte"].astype("string")
+contagem = {
+    ROTULOS["tpd"]: int((coluna_fonte == ROTULOS["tpd"]).sum()),
+    ROTULOS["csv"]: int((coluna_fonte == ROTULOS["csv"]).sum()),
+    ROTULOS["xlsx"]: int((coluna_fonte == ROTULOS["xlsx"]).sum()),
+    "múltiplas": int(coluna_fonte.str.contains(";", na=False).sum()),
+}
+for r, (nome, cor) in enumerate(CORES.items(), start=2):
+    wsl.cell(row=r, column=1).fill = preenchimentos[cor]
+    wsl.cell(row=r, column=2, value=descricao.get(nome, nome))
+    wsl.cell(row=r, column=3, value=contagem.get(nome, 0))
+wsl.column_dimensions["A"].width = 6
+wsl.column_dimensions["B"].width = 52
+wsl.column_dimensions["C"].width = 10
 
-code(r"""
-# Como o nome chega ao mapa:
-for exemplo in ["DC₅₀ (nM)", "Degradation DC50", "dc50_nm", "T1/2 (h)"]:
-    print(f"  {exemplo!r:26} -> {pf.normalizar_nome(exemplo)!r}")
+# --- PROVENIENCIA --------------------------------------------------------
+if "PROVENIENCIA" in wb.sheetnames:
+    del wb["PROVENIENCIA"]
+wsp = wb.create_sheet("PROVENIENCIA")
+cols_prov = ["idx"] + EXTRAS
+for c, nome in enumerate(cols_prov, start=1):
+    wsp.cell(row=1, column=c, value=nome).font = Font(bold=True)
+for desloc, registro in enumerate(final.to_dict("records")):
+    for c, chave in enumerate(cols_prov, start=1):
+        valor = registro.get(chave, pd.NA)
+        if valor is pd.NA or (not isinstance(valor, str) and pd.isna(valor)):
+            valor = None
+        elif not isinstance(valor, (int, float, str)):
+            valor = str(valor)
+        wsp.cell(row=2 + desloc, column=c, value=valor)
 
-# --- descomente e adapte -------------------------------------------------
-# pf.APELIDOS["dc50"].append(r"\bdegradation potency\b")
-# pf.APELIDOS["t_meia"].append(r"\bterminal half life\b")
-#
-# Para um parâmetro que a planilha não tem, acrescente antes a coluna em
-# pf.PARAMETROS — senão o valor é lido e descartado na exportação.
+wb.save(SAIDA)
+print(f"\nsalvo: {SAIDA.resolve()}")
+print(f"abas: {', '.join(wb.sheetnames)}")
+''')
 
-# Confira o efeito numa lista de colunas de verdade, sem reprocessar tudo:
-# mapa, auditoria = pf.mapear_colunas(["Smiles", "Degradation Potency (nM)"])
-# print(mapa); print(auditoria["sem_destino"])
-""")
-
-
-# ===========================================================================
-# 6. EXPORTAR
-# ===========================================================================
-md(r"""
----
-## §6 — Exportar
-
-Grava a aba **PAPERS** com as 28 colunas na ordem exata da planilha: cabeçalho
-na linha 3, dados a partir da linha 4.
-
-Com `MODELO` apontando para a sua planilha, a formatação dela é preservada.
-**O modelo nunca é sobrescrito** — a saída é sempre `SAIDA`, e o módulo recusa
-gravar por cima do modelo.
-
-Vão duas abas de auditoria, e elas são o que torna a revisão defensável:
-
-- **`PROVENIENCIA`** — de qual base e de qual arquivo veio cada linha, com o id
-  do composto na base de origem. É aqui que fica registrado que o valor do
-  PROTAC-PatentDB é **previsto**, não medido.
-- **`MAPEAMENTO`** — qual coluna de qual base alimentou cada parâmetro, mais o
-  que ficou sem destino e o que a base não traz.
-""")
-
-code(r"""
-if tabela.empty:
-    print("nada para exportar — reveja a §3")
-else:
-    caminho = pf.exportar_planilha(tabela, SAIDA, modelo=MODELO,
-                                   resultado=resultado)
-    print(f"planilha: {caminho}")
-    print(f"csv:      {pf.exportar_csv(tabela, SAIDA_CSV)}")
-    print(f"\n{len(tabela)} linha(s), {len(pf.CHAVES)} colunas na aba PAPERS")
-    print("abas: PAPERS (dados) + PROVENIENCIA (origem) + MAPEAMENTO (auditoria)")
-""")
-
-md(r"""
+md(r'''
 ### Conferência da saída
 
-Lê de volta o arquivo gravado e compara o cabeçalho com o que a planilha espera.
-Rápido, e pega o caso em que o modelo tem a aba com outro nome ou outro layout.
-""")
+Relê o arquivo gravado e confere o cabeçalho, a contagem de linhas e as cores.
+''')
 
-code(r"""
-if not tabela.empty:
-    from openpyxl import load_workbook
+code(r'''
+conf = load_workbook(SAIDA)["PAPERS"]
+cabecalho = [conf.cell(row=3, column=c).value for c in range(1, len(CHAVES) + 1)]
+esperado = [ROTULOS_COL[k] for k in CHAVES]
 
-    ws = load_workbook(caminho)["PAPERS"]
-    cabecalho = [ws.cell(row=3, column=c).value for c in range(1, len(pf.CHAVES) + 1)]
-    esperado = [pf.ROTULOS[k] for k in pf.CHAVES]
+if cabecalho == esperado:
+    print(f"cabeçalho confere ({len(esperado)} colunas)")
+else:
+    for i, (saiu, devia) in enumerate(zip(cabecalho, esperado), start=1):
+        if saiu != devia:
+            print(f"  col {i}: saiu {saiu!r}, esperado {devia!r}")
 
-    if cabecalho == esperado:
-        print(f"cabeçalho confere ({len(esperado)} colunas)")
-    else:
-        print("CABEÇALHO DIVERGENTE — compare:")
-        for i, (saiu, devia) in enumerate(zip(cabecalho, esperado), start=1):
-            if saiu != devia:
-                print(f"  col {i}: saiu {saiu!r}, devia ser {devia!r}")
+pintadas = {}
+for linha in conf.iter_rows(min_row=LINHA_INICIAL,
+                            max_row=LINHA_INICIAL + len(final) - 1,
+                            max_col=1):
+    cor = linha[0].fill.fgColor.rgb
+    pintadas[cor] = pintadas.get(cor, 0) + 1
 
-    preenchidas = sum(1 for linha in ws.iter_rows(min_row=4, max_row=3 + len(tabela))
-                      if any(c.value is not None for c in linha))
-    print(f"linhas com dado a partir da linha 4: {preenchidas}")
-""")
+print(f"linhas de dados: {LINHA_INICIAL} a {LINHA_INICIAL + len(final) - 1}")
+print("cores aplicadas (contagem por cor):")
+for cor, n in sorted(pintadas.items(), key=lambda kv: -kv[1]):
+    nome = next((k for k, v in CORES.items() if str(cor).endswith(v)), str(cor))
+    print(f"  {nome:<14} {n:>6}")
+''')
 
-
-# ===========================================================================
-# 7. REPETIR PARA VÁRIOS ALVOS
-# ===========================================================================
-md(r"""
+md(r'''
 ---
-## §7 — Vários alvos de uma vez
+## Rodar na workstation
 
-Para uma revisão com vários alvos, o laço abaixo evita reabrir o notebook a
-cada um. Um arquivo por alvo. Os arquivos das bases já estão em disco depois da
-§2, então aqui vai `baixar=False` — não baixa de novo a cada alvo.
-""")
+Com o VSCode conectado via Remote-SSH, selecione o kernel do env que tem
+RDKit (`mdtools`) — sem ele a deduplicação entre bases fica fraca. Depois
+ajuste `PASTA` na §1 e `Run All`.
 
-code(r"""
-# Preencha com os seus alvos. O UniProt de cada um importa pelo PROTAC-Bench.
-ALVOS = [
-    # ("BRD4",  "O60885", ["bromodomain 4"]),
-    # ("PCSK9", "Q8NBP7", ["proprotein convertase subtilisin/kexin type 9"]),
-]
-
-for nome_alvo, uniprot_alvo, sinonimos_alvo in ALVOS:
-    ped = pf.Pedido(alvo=nome_alvo, uniprot=uniprot_alvo,
-                    sinonimos=sinonimos_alvo, bases=BASES,
-                    unidades_fixas=UNIDADES_FIXAS,
-                    consolidar_duplicatas=CONSOLIDAR)
-    res = pf.coletar(ped, dir_dados=DIR_DADOS, baixar=False)
-    if res.tabela.empty:
-        print(f"{nome_alvo}: nada encontrado")
-        continue
-    destino = RAIZ / "resultados" / f"revisao_{nome_alvo}.xlsx"
-    pf.exportar_planilha(res.tabela, destino, modelo=MODELO, resultado=res)
-    com_dc50 = int(res.tabela["dc50"].notna().sum()) if "dc50" in res.tabela else 0
-    print(f"{nome_alvo}: {len(res.tabela)} linha(s) "
-          f"({com_dc50} com DC₅₀) -> {destino.name}")
-""")
-
-md(r"""
----
-## Fora do notebook
-
-O mesmo trabalho pela linha de comando, para entrar em script ou SLURM:
+Dependências: `pandas`, `openpyxl` e, recomendado, `rdkit`.
 
 ```bash
-python scripts/protac_fontes.py \
-    --alvo BRD4 \
-    --sinonimo "bromodomain 4" \
-    --dir-dados dados/bases \
-    --modelo dados/Revisao_PROTAC.xlsx \
-    --saida resultados/revisao_BRD4.xlsx \
-    --saida-csv resultados/revisao_BRD4.csv
+conda activate mdtools
+python -c "import pandas, openpyxl, rdkit; print('ok')"
 ```
-
-`python scripts/protac_fontes.py --help` lista o resto. Os testes da lógica:
-
-```bash
-python -m unittest discover -s tests -v
-```
-
-## Para citar
-
-As quatro bases devem ser citadas na revisão; `pf.FONTES[...].pagina` tem o
-endereço de cada uma. O que a aba `PROVENIENCIA` registra por linha é o que
-permite dizer, na defesa, de onde veio cada número — e separar o medido
-(PROTAC-DB, PROTACpedia) do previsto (PROTAC-PatentDB).
-""")
-
+''')
 
 # ===========================================================================
 NOTEBOOK = {
@@ -525,7 +748,8 @@ NOTEBOOK = {
     "nbformat_minor": 5,
 }
 
-destino = Path(__file__).resolve().parent.parent / "notebooks" / "protac_revisao_parametros.ipynb"
+destino = (Path(__file__).resolve().parent.parent / "notebooks"
+           / "protac_revisao_parametros.ipynb")
 destino.parent.mkdir(parents=True, exist_ok=True)
 destino.write_text(json.dumps(NOTEBOOK, ensure_ascii=False, indent=1) + "\n",
                    encoding="utf-8")
